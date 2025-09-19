@@ -1,0 +1,6 @@
+pytest>=7.0
+# Qt testing utilities
+pytest-qt>=4.0
+# Optional dev tools
+flake8
+mypy
