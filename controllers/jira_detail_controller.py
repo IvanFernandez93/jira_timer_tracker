@@ -312,7 +312,8 @@ class JiraDetailController(QObject):
         
         # Check if auto-sync is enabled
         from services.app_settings import AppSettings
-        app_settings = AppSettings()
+        # Use the controller's db_service instance when creating AppSettings
+        app_settings = AppSettings(self.db_service)
         auto_sync = app_settings.get_setting("auto_sync", "false").lower() == "true"
         
         message = "Il commento è stato aggiunto alla coda di sincronizzazione."
@@ -640,9 +641,9 @@ class JiraDetailController(QObject):
             # Add to sync queue
             self.db_service.add_to_sync_queue("ADD_WORKLOG", json.dumps(payload))
             
-            # Check if auto-sync is enabled
+            # Check if auto-sync is enabled (use this controller's db_service)
             from services.app_settings import AppSettings
-            app_settings = AppSettings()
+            app_settings = AppSettings(self.db_service)
             auto_sync = app_settings.get_setting("auto_sync", "false").lower() == "true"
             
             # Reload time history to show new entry

@@ -4,13 +4,22 @@ import logging
 logger = logging.getLogger('JiraTimeTracker')
 
 
-def apply_always_on_top(window, app_settings=None):
+def apply_always_on_top(window, app_settings=None, raise_window: bool = True):
     """Apply or remove the WindowStaysOnTopHint on a window based on settings.
 
+    Args:
+        window: the QWidget to modify.
+        app_settings: optional AppSettings instance used to read the 'always_on_top' flag.
+        raise_window: when True (default) the function will raise and activate the window
+            after applying the flags. When False it will apply the flags but will not
+            perform raise()/activateWindow(), which is useful when callers want to
+            control stacking order themselves (e.g. show a detail window above the main
+            window without main stealing focus).
+
     This function manipulates the flags explicitly (adds or removes the hint)
-    and refreshes the window by calling show()/raise()/activateWindow() where
-    appropriate. It avoids blind calls to setWindowFlags(window.windowFlags())
-    which can inadvertently strip other flags and cause windows to disappear.
+    and refreshes the window by calling show() where appropriate. It avoids blind
+    calls to setWindowFlags(window.windowFlags()) which can inadvertently strip other
+    flags and cause windows to disappear.
     """
     try:
         enabled = False
@@ -43,11 +52,16 @@ def apply_always_on_top(window, app_settings=None):
                 if not window.isVisible():
                     window.show()
 
-                if enabled:
-                    # Raising/activating a visible window is safe and does not
-                    # force showEvent in most toolkits
-                    window.raise_()
-                    window.activateWindow()
+                # Optionally raise/activate the window. Some callers (for example
+                # when showing a detail window while the main window is always-on-top)
+                # want to reapply the flags without forcing a raise here. Use the
+                # raise_window parameter to control that behaviour.
+                if enabled and raise_window:
+                    try:
+                        window.raise_()
+                        window.activateWindow()
+                    except Exception:
+                        pass
             except Exception:
                 pass
         except Exception:

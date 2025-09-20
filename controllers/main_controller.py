@@ -614,7 +614,9 @@ class MainController(QObject):
                 # After a short delay reapply main always-on-top and then re-raise the detail
                 def _reapply_and_raise_detail():
                     try:
-                        apply_always_on_top(self.view, self.app_settings)
+                        # Reapply flags but do not force a raise on main; we'll re-raise the detail
+                        from services.ui_utils import apply_always_on_top
+                        apply_always_on_top(self.view, self.app_settings, raise_window=False)
                     except Exception:
                         logger.exception('Failed to reapply always-on-top on main (non-invasive path)')
                     try:
@@ -640,9 +642,17 @@ class MainController(QObject):
                                  self.view.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) if hasattr(self.view, 'testAttribute') else None)
                 except Exception:
                     pass
+                # Remove the always-on-top hint but DO NOT call show() to avoid bringing
+                # the main window to the foreground. We'll rely on processEvents() to
+                # allow the windowing system to apply flag changes.
                 main_flags = main_flags & ~Qt.WindowType.WindowStaysOnTopHint
-                self.view.setWindowFlags(main_flags)
-                self.view.show()
+                try:
+                    self.view.setWindowFlags(main_flags)
+                    # Process pending events so the flag change takes effect without
+                    # forcing a show()/raise which would steal focus.
+                    QApplication.processEvents()
+                except Exception:
+                    logger.exception('Failed to clear always-on-top on main (fallback)')
             except Exception:
                 logger.exception('Failed to clear always-on-top on main (fallback)')
 
@@ -689,7 +699,9 @@ class MainController(QObject):
             # reapply always-on-top after a short delay
             def _reapply():
                 try:
-                    apply_always_on_top(self.view, self.app_settings)
+                    # Reapply flags but avoid raising main which could cover the detail
+                    from services.ui_utils import apply_always_on_top
+                    apply_always_on_top(self.view, self.app_settings, raise_window=False)
                 except Exception:
                     logger.exception('Failed to reapply always-on-top on main (fallback)')
 
@@ -745,7 +757,21 @@ class MainController(QObject):
         last_active_key = self.app_settings.get_setting('last_active_jira')
         if not last_active_key:
             # Maybe show a message to the user? For now, just log it.
-            print("No last active Jira found.")
+            # No last active Jira persisted — log and show a friendly message to the user
+            try:
+                self._logger.info("No last active Jira found.")
+            except Exception:
+                pass
+            try:
+                # Prefer a GUI message so the user understands why nothing opened
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.information(self.view, "Nessun ticket attivo", "Non è stato trovato alcun ticket attivo di recente.")
+            except Exception:
+                # Fall back to logging if GUI message fails
+                try:
+                    self._logger.debug("Unable to show information dialog for missing last active Jira")
+                except Exception:
+                    pass
             return
 
         # This logic is duplicated from _open_detail_view.
@@ -830,8 +856,22 @@ class MainController(QObject):
         """Shows or hides the mini widget when the main window is minimized/restored."""
         if state == Qt.WindowState.WindowMinimized:
             # Always show the mini widget when window is minimized (as per requirements)
-            if not self.mini_widget_view.isVisible():
-                self.mini_widget_controller.show(QApplication.primaryScreen())
+            try:
+                screen = QApplication.primaryScreen()
+                if screen is not None:
+                    if not self.mini_widget_view.isVisible():
+                        self.mini_widget_controller.show(screen)
+                else:
+                    try:
+                        self._logger.debug("Primary screen not available; skipping mini widget show")
+                    except Exception:
+                        pass
+            except Exception:
+                try:
+                    self._logger.exception('Error while accessing primary screen')
+                except Exception:
+                    pass
+
             # Update display immediately
             self._update_widget_display()
         else:
@@ -870,12 +910,57 @@ class MainController(QObject):
 
         # Gracefully stop any active threads started by this controller
         try:
+            # First, attempt to stop worker objects if they expose a stop/terminate API
+            try:
+                for w in list(self._active_workers):
+                    try:
+                        # Prefer cooperative stop if available
+                        if hasattr(w, 'stop'):
+                            try:
+                                w.stop()
+                            except Exception:
+                                pass
+                        if hasattr(w, 'requestInterruption'):
+                            try:
+                                w.requestInterruption()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Then attempt to stop threads safely
             for thread in list(self._active_threads):
                 try:
-                    # Request thread to quit; if it's running an event loop it will exit
-                    thread.quit()
-                    # Give a short timeout for the thread to finish
-                    thread.wait(3000)
+                    # Ask the thread to quit (for event loops)
+                    try:
+                        thread.quit()
+                    except Exception:
+                        pass
+
+                    # Wait briefly for cooperative shutdown
+                    try:
+                        if not thread.wait(3000):
+                            # If still running, attempt cooperative interruption
+                            try:
+                                thread.requestInterruption()
+                            except Exception:
+                                pass
+                            # Wait a bit longer
+                            thread.wait(2000)
+                    except Exception:
+                        pass
+
+                    # If the thread is still running after cooperative attempts, force terminate
+                    try:
+                        if thread.isRunning():
+                            try:
+                                thread.terminate()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 except Exception:
                     pass
         except Exception:

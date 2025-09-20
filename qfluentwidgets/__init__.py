@@ -1,7 +1,8 @@
-"""Small, well-formed shim for qfluentwidgets used during development/tests.
+"""Minimal shim of qfluentwidgets used by the project tests and main app.
 
-Only implements a minimal API surface the application imports so local
-development and pytest-qt runs work without the external dependency.
+This file provides a small, well-formed subset of the qfluentwidgets API the
+application imports during development and tests. It intentionally keeps
+implementation minimal and avoids complex Qt behaviour.
 """
 from __future__ import annotations
 
@@ -10,23 +11,183 @@ from typing import Optional, Callable
 
 from PyQt6.QtWidgets import (
     QWidget, QMainWindow, QFrame, QHBoxLayout, QVBoxLayout,
-    QStackedWidget, QPushButton, QSizePolicy, QSpacerItem
+    QStackedWidget, QPushButton, QSizePolicy, QSpacerItem,
+    QLabel, QLineEdit, QTextEdit, QCheckBox, QComboBox, QTableWidget
 )
 from PyQt6.QtGui import QIcon
 from PyQt6.QtCore import QTranslator
+from PyQt6.QtWidgets import QLabel
 
 
-class FluentIcon:
+class FluentIconMeta(type):
+    """Metaclass that returns a default QIcon for any unknown attribute.
+
+    This prevents AttributeError when the application references icons that
+    aren't explicitly enumerated in the shim. It also caches the generated
+    QIcon on the class so subsequent accesses are fast.
+    """
+
+    def __getattr__(cls, name: str):
+        # Create a small colored pixmap with the first letter as a visible
+        # placeholder so toolbar buttons are identifiable during development.
+        try:
+            from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
+            size = 16
+            pix = QPixmap(size, size)
+            # derive a color from the name for variety
+            h = abs(hash(name)) % 360
+            color = QColor.fromHsv(h, 180, 220)
+            pix.fill(color)
+
+            painter = QPainter(pix)
+            try:
+                painter.setPen(QColor(30, 30, 30))
+                font = QFont()
+                font.setPointSize(10)
+                font.setBold(True)
+                painter.setFont(font)
+                letter = (name[0].upper() if name else '?')
+                painter.drawText(pix.rect(), int(0x84), letter)
+            finally:
+                painter.end()
+
+            icon = QIcon(pix)
+        except Exception:
+            # Fall back to an empty icon if drawing fails
+            icon = QIcon()
+
+        setattr(cls, name, icon)
+        return icon
+
+
+class FluentIcon(metaclass=FluentIconMeta):
+    # Common icons used across the app (explicitly listed for clarity)
     FOLDER = QIcon()
+    HISTORY = QIcon()
+    GRID = QIcon()
+    BRUSH = QIcon()
+    SEARCH = QIcon()
+    RINGER = QIcon()
+    DOCUMENT = QIcon()
+    RETURN = QIcon()
+    UPDATE = QIcon()
+    SETTING = QIcon()
+    PLAY = QIcon()
+    PAUSE = QIcon()
+    CLOSE = QIcon()
+    # icons used by markdown editor and other toolbars
+    FONT = QIcon()
+    BOLD = QIcon()
+    ITALIC = QIcon()
+    LINK = QIcon()
+    IMAGE = QIcon()
+    UNDO = QIcon()
+    REDO = QIcon()
+    CHECKBOX = QIcon()
+    CHECK = QIcon()
+    PLUS = QIcon()
+    MINUS = QIcon()
 
 
 class PushButton(QPushButton):
-    pass
+    """Compatibility wrapper around QPushButton that accepts multiple
+    convenient constructor signatures used across the app:
+
+    - PushButton(text)
+    - PushButton(icon, text)
+    - PushButton(icon)
+    - PushButton(text, parent)
+    - PushButton(icon, text, parent)
+
+    PyQt6's QPushButton exposes overloads but Python call sites in the app
+    sometimes pass (icon) or (icon, text) in a straightforward manner; this
+    wrapper normalizes args and calls the appropriate super().__init__.
+    """
+
+    def __init__(self, *args, **kwargs):
+        icon = None
+        text = None
+        parent = None
+
+        # positional parsing
+        if len(args) == 0:
+            # nothing positional; pick from kwargs
+            text = kwargs.pop('text', None)
+            parent = kwargs.pop('parent', None)
+            icon = kwargs.pop('icon', None)
+        elif len(args) == 1:
+            a0 = args[0]
+            if isinstance(a0, QIcon):
+                icon = a0
+            elif isinstance(a0, str):
+                text = a0
+            else:
+                parent = a0
+            parent = kwargs.pop('parent', parent)
+        elif len(args) == 2:
+            a0, a1 = args
+            if isinstance(a0, QIcon) and isinstance(a1, str):
+                icon, text = a0, a1
+            elif isinstance(a0, str):
+                text, parent = a0, a1
+            else:
+                # fallback: treat second as parent
+                parent = a1
+        else:
+            # 3 or more
+            a0, a1, a2 = args[:3]
+            if isinstance(a0, QIcon) and isinstance(a1, str):
+                icon, text, parent = a0, a1, a2
+            elif isinstance(a0, str):
+                text, parent = a0, a1
+            else:
+                parent = a2
+
+        # Final fallbacks from kwargs
+        if text is None:
+            text = kwargs.pop('text', None)
+        if parent is None:
+            parent = kwargs.pop('parent', None)
+        if icon is None:
+            icon = kwargs.pop('icon', None)
+
+        # Call the appropriate QPushButton constructor
+        try:
+            if icon is not None and text is not None:
+                super().__init__(icon, text, parent)
+            elif text is not None:
+                super().__init__(text, parent)
+                if icon is not None:
+                    try:
+                        self.setIcon(icon)
+                    except Exception:
+                        pass
+            elif icon is not None:
+                # QPushButton doesn't have icon-only Python overload; create
+                # a button with empty text and set the icon.
+                super().__init__("", parent)
+                try:
+                    self.setIcon(icon)
+                except Exception:
+                    pass
+            else:
+                super().__init__(parent)
+        except TypeError:
+            # Fallback to a safe call
+            try:
+                super().__init__(parent)
+            except Exception:
+                super().__init__()
 
 
 class FluentTranslator(QTranslator):
     def translate(self, context, sourceText, disambiguation=None, n=-1):
         return sourceText
+
+
+def getIconColor(name: str) -> str:
+    return '#000000'
+
 
 
 class NavigationItemPosition(Enum):
@@ -37,130 +198,53 @@ class NavigationItemPosition(Enum):
 
 
 def getIconColor(name: str) -> str:
-    return '#000'
+    return '#000000'
 
 
 class FluentWindow(QMainWindow):
-    """Minimal main window exposing titleBar, _nav_rail, _stacked and
-    navigationInterface with addItem/addSeparator/setCurrentItem.
+    """Minimal main window exposing a titleBar, a left nav rail and a stacked area.
+
+    The navigationInterface returned by _make_nav_interface supports addItem,
+    addSeparator and setCurrentItem used by the application.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # title bar placeholder
         self.titleBar = QFrame(self)
-        central = QWidget(self)
-        layout = QHBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self._nav_rail = QFrame(central)
-        self._nav_layout = QVBoxLayout(self._nav_rail)
+        # ensure titleBar has a layout so callers can add widgets to it
         try:
-            self._nav_rail.setFixedWidth(180)
-        except Exception:
-            pass
-        self._stacked = QStackedWidget(central)
-        layout.addWidget(self._nav_rail)
-        layout.addWidget(self._stacked, 1)
-        central.setLayout(layout)
-        wrapper = QWidget(self)
-        w = QVBoxLayout(wrapper)
-        w.setContentsMargins(0, 0, 0, 0)
-        w.addWidget(self.titleBar)
-        w.addWidget(central, 1)
-        wrapper.setLayout(w)
-        self.setCentralWidget(wrapper)
-        self.navigationInterface = self._make_nav_interface()
-
-    def _make_nav_interface(self):
-        parent = self
-
-        class NavInterface:
-            def __init__(self, parent):
-                self.parent = parent
-                self.items = []
-
-            def addItem(self, id_, icon, label, position=None, onClick: Optional[Callable] = None, **kwargs):
-                btn = PushButton(label)
-                try:
-                    btn.setObjectName(id_)
-                    btn.setFixedHeight(34)
-                except Exception:
-                    pass
-                try:
-                    self.parent._nav_layout.addWidget(btn)
-                except Exception:
-                    pass
-                if onClick:
-                    try:
-                        btn.clicked.connect(onClick)
-                    except Exception:
-                        pass
-                try:
-                    btn.show()
-                except Exception:
-                    pass
-                self.items.append(btn)
-                return btn
-
-            def addSeparator(self):
-                try:
-                    self.parent._nav_layout.addItem(QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
-                except Exception:
-                    pass
-
-            def setCurrentItem(self, id_or_name):
-                try:
-                    for i in range(self.parent._stacked.count()):
-                        w = self.parent._stacked.widget(i)
-                        if w.objectName() == id_or_name:
-                            self.parent._stacked.setCurrentIndex(i)
-                            return
-                except Exception:
-                    pass
-
-        return NavInterface(parent)
-
-
-__all__ = [
-    'FluentWindow', 'FluentIcon', 'PushButton', 'FluentTranslator', 'NavigationItemPosition', 'getIconColor'
-]
-
-# Backwards compat name used in imports
-FIF = FluentIcon
-        super().__init__(*args, **kwargs)
-
-        self.titleBar = QFrame(self)
-        try:
-            tl = QHBoxLayout(self.titleBar)
-            tl.setContentsMargins(6, 4, 6, 4)
-            tl.setSpacing(8)
-            self.titleBar.setLayout(tl)
+            from PyQt6.QtWidgets import QHBoxLayout
+            tb_layout = QHBoxLayout(self.titleBar)
+            tb_layout.setContentsMargins(8, 2, 8, 2)
+            tb_layout.setSpacing(6)
+            self.titleBar.setLayout(tb_layout)
         except Exception:
             pass
 
+        # central area
         central = QWidget(self)
         central_layout = QHBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
 
+        # nav rail and layout
         self._nav_rail = QFrame(central)
         self._nav_layout = QVBoxLayout(self._nav_rail)
-        self._nav_layout.setContentsMargins(6, 6, 6, 6)
-        self._nav_layout.setSpacing(6)
         try:
             self._nav_rail.setFixedWidth(180)
             self._nav_rail.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         except Exception:
-            try:
-                self._nav_rail.setMinimumWidth(160)
-            except Exception:
-                pass
+            pass
 
+        # stacked area
         self._stacked = QStackedWidget(central)
 
         central_layout.addWidget(self._nav_rail)
         central_layout.addWidget(self._stacked, 1)
         central.setLayout(central_layout)
 
+        # wrapper with title bar on top
         wrapper = QWidget(self)
         w_layout = QVBoxLayout(wrapper)
         w_layout.setContentsMargins(0, 0, 0, 0)
@@ -186,13 +270,12 @@ FIF = FluentIcon
                 try:
                     btn.setObjectName(id_)
                     btn.setFixedHeight(34)
-                    btn.setMinimumWidth(120)
-                    btn.setStyleSheet('text-align: left; padding-left: 8px;')
                 except Exception:
                     pass
 
                 try:
-                    self.parent._nav_layout.addWidget(btn)
+                    if hasattr(self.parent, '_nav_layout') and self.parent._nav_layout is not None:
+                        self.parent._nav_layout.addWidget(btn)
                 except Exception:
                     pass
 
@@ -204,7 +287,6 @@ FIF = FluentIcon
 
                 try:
                     btn.show()
-                    btn.setVisible(True)
                 except Exception:
                     pass
 
@@ -213,19 +295,21 @@ FIF = FluentIcon
                 return btn
 
             def addSeparator(self):
-                spacer = QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
                 try:
-                    self.parent._nav_layout.addItem(spacer)
+                    spacer = QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+                    if hasattr(self.parent, '_nav_layout') and self.parent._nav_layout is not None:
+                        self.parent._nav_layout.addItem(spacer)
                 except Exception:
                     pass
 
             def setCurrentItem(self, id_or_name):
                 try:
-                    for idx in range(self.parent._stacked.count()):
-                        w = self.parent._stacked.widget(idx)
-                        if w.objectName() == id_or_name:
-                            self.parent._stacked.setCurrentIndex(idx)
-                            return
+                    if hasattr(self.parent, '_stacked') and self.parent._stacked is not None:
+                        for idx in range(self.parent._stacked.count()):
+                            w = self.parent._stacked.widget(idx)
+                            if w.objectName() == id_or_name:
+                                self.parent._stacked.setCurrentIndex(idx)
+                                return
                 except Exception:
                     pass
 
@@ -238,9 +322,15 @@ FIF = FluentIcon
         except Exception:
             pass
 
-        self._stacked.addWidget(widget)
+        try:
+            self._stacked.addWidget(widget)
+        except Exception:
+            pass
 
-        def _cb(w=widget):
+        def _cb(*_, w=widget):
+            # Some Qt signals (like clicked) pass a boolean `checked` arg.
+            # Accept and ignore any extra positional/keyword args so the
+            # captured widget is always used for index lookup.
             idx = self._stacked.indexOf(w)
             if idx >= 0:
                 self._stacked.setCurrentIndex(idx)
@@ -253,18 +343,24 @@ FIF = FluentIcon
                 btn = PushButton(label)
                 btn.setObjectName(id_name)
                 btn.setParent(self._nav_rail)
-                self._nav_layout.addWidget(btn)
-                btn.clicked.connect(_cb)
+                try:
+                    self._nav_layout.addWidget(btn)
+                except Exception:
+                    pass
+                try:
+                    btn.clicked.connect(_cb)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
 
-__all__ = [
-    'FluentWindow', 'FluentIcon', 'PushButton', 'FluentTranslator', 'NavigationItemPosition'
-]
+class InfoBar(QWidget):
+    pass
 
-# Backwards compat alias
-FIF = FluentIcon
+
+class InfoBarPosition(Enum):
+    TOP = 1
     BOTTOM = 2
 
 
@@ -287,122 +383,87 @@ def isDarkTheme() -> bool:
     return _current_theme == Theme.DARK
 
 
-__all__ = [
-    'LineEdit', 'PushButton', 'BodyLabel', 'TextEdit', 'FluentIcon',
-    'FIF', 'SwitchButton', 'ExpandLayout', 'ComboBox', 'TransparentToolButton',
-    'FluentWindow', 'NavigationItemPosition', 'SubtitleLabel', 'setFont',
-    'InfoBar', 'InfoBarPosition', 'IconWidget', 'Theme', 'setTheme', 'isDarkTheme',
-    'TableWidget', 'SearchLineEdit', 'FluentTranslator', 'Dialog', 'ToolButton',
-    'MessageBox', 'getIconColor'
-]
-
-# Backwards compat alias used by imports in the repo
-FIF = FluentIcon
-                    self.items.append(btn)
-                    self._items_by_id[id_] = btn
-                    return btn
-
-                def addSeparator(self):
-                    spacer = QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-                    try:
-                        self.parent._nav_layout.addItem(spacer)
-                    except Exception:
-                        pass
-
-                def setCurrentItem(self, id_or_name):
-                    try:
-                        for idx in range(self.parent._stacked.count()):
-                            w = self.parent._stacked.widget(idx)
-                            if w.objectName() == id_or_name:
-                                self.parent._stacked.setCurrentIndex(idx)
-                                return
-                    except Exception:
-                        pass
-
-            return NavInterface(parent)
-
-        def addSubInterface(self, widget: QWidget, icon: QIcon, label: str):
-            try:
-                if not widget.objectName():
-                    widget.setObjectName(label)
-            except Exception:
-                pass
-
-            self._stacked.addWidget(widget)
-
-            def _cb(w=widget):
-                idx = self._stacked.indexOf(w)
-                if idx >= 0:
-                    self._stacked.setCurrentIndex(idx)
-
-            try:
-                id_name = widget.objectName() or label
-                self.navigationInterface.addItem(id_name, icon, label, onClick=_cb)
-            except Exception:
-                try:
-                    btn = PushButton(label)
-                    btn.setObjectName(id_name)
-                    btn.setParent(self._nav_rail)
-                    self._nav_layout.addWidget(btn)
-                    btn.clicked.connect(_cb)
-                except Exception:
-                    pass
-
-
-    class InfoBar(QWidget):
-        pass
-
-
-    class InfoBarPosition(Enum):
-        TOP = 1
-        BOTTOM = 2
-
-
-    class Theme(Enum):
-        LIGHT = 'light'
-        DARK = 'dark'
-
-
-    _current_theme = Theme.LIGHT
-
-
-    def setTheme(theme: Theme | str):
-        global _current_theme
-        if isinstance(theme, str):
-            theme = Theme[theme.upper()] if theme.upper() in Theme.__members__ else Theme.LIGHT
-        _current_theme = theme
-
-
-    def isDarkTheme() -> bool:
-        return _current_theme == Theme.DARK
-
-
-    __all__ = [
-        'LineEdit', 'PushButton', 'BodyLabel', 'TextEdit', 'FluentIcon',
-        'FIF', 'SwitchButton', 'ExpandLayout', 'ComboBox', 'TransparentToolButton',
-        'FluentWindow', 'NavigationItemPosition', 'SubtitleLabel', 'setFont',
-        'InfoBar', 'InfoBarPosition', 'IconWidget', 'Theme', 'setTheme', 'isDarkTheme',
-        'TableWidget', 'SearchLineEdit', 'FluentTranslator', 'Dialog', 'ToolButton',
-        'MessageBox', 'getIconColor'
-    ]
-
-    # Backwards compat alias used by imports in the repo
-    FIF = FluentIcon
-class FluentTranslator(QTranslator):
-    def translate(self, context, sourceText, disambiguation=None, n=-1):
-        return sourceText
-
-
-class PushButton(QPushButton):
-    pass
-
-
+# Other simple components referenced across the repo (no-op implementations)
 class Dialog(QWidget):
     pass
 
 
 class ToolButton(QPushButton):
-    pass
+    """ToolButton should accept icon-only construction used by editors.
+
+    We implement the same flexible constructor logic as PushButton so code
+    that does ToolButton(FIF.SOMETHING) works.
+    """
+
+    def __init__(self, *args, **kwargs):
+        # Reuse PushButton logic by delegating to PushButton.__init__ but keep
+        # the class type as ToolButton.
+        # Construct a temporary PushButton to parse args, then reparent.
+        icon = None
+        text = None
+        parent = None
+
+        if len(args) == 0:
+            text = kwargs.pop('text', None)
+            parent = kwargs.pop('parent', None)
+            icon = kwargs.pop('icon', None)
+        elif len(args) == 1:
+            a0 = args[0]
+            if isinstance(a0, QIcon):
+                icon = a0
+            elif isinstance(a0, str):
+                text = a0
+            else:
+                parent = a0
+            parent = kwargs.pop('parent', parent)
+        elif len(args) == 2:
+            a0, a1 = args
+            if isinstance(a0, QIcon) and isinstance(a1, str):
+                icon, text = a0, a1
+            elif isinstance(a0, str):
+                text, parent = a0, a1
+            else:
+                parent = a1
+        else:
+            a0, a1, a2 = args[:3]
+            if isinstance(a0, QIcon) and isinstance(a1, str):
+                icon, text, parent = a0, a1, a2
+            elif isinstance(a0, str):
+                text, parent = a0, a1
+            else:
+                parent = a2
+
+        if text is None:
+            text = kwargs.pop('text', None)
+        if parent is None:
+            parent = kwargs.pop('parent', None)
+        if icon is None:
+            icon = kwargs.pop('icon', None)
+
+        # Initialize as a QPushButton similarly
+        try:
+            if icon is not None and text is not None:
+                super().__init__(icon, text, parent)
+            elif text is not None:
+                super().__init__(text, parent)
+                if icon is not None:
+                    try:
+                        self.setIcon(icon)
+                    except Exception:
+                        pass
+            elif icon is not None:
+                super().__init__("", parent)
+                try:
+                    self.setIcon(icon)
+                except Exception:
+                    pass
+            else:
+                super().__init__(parent)
+        except TypeError:
+            try:
+                super().__init__(parent)
+            except Exception:
+                super().__init__()
 
 
 class MessageBox(QWidget):
@@ -411,11 +472,70 @@ class MessageBox(QWidget):
         return None
 
 
-class TableWidget(QWidget):
-    pass
+class Flyout(QWidget):
+    """Minimal Flyout shim used by the app.
+
+    The real Flyout provides a small, transient message anchored to a
+    target widget. For the shim we provide a simple static `create`
+    helper that shows a non-modal QLabel-like popup near the target and
+    auto-closes after an optional timeout.
+    """
+
+    @staticmethod
+    def create(title: str, content: str, target: Optional[QWidget] = None, parent: Optional[QWidget] = None, timeout: int = 3000):
+        try:
+            from PyQt6.QtWidgets import QLabel, QFrame
+            from PyQt6.QtCore import Qt, QTimer
+
+            # Create a frameless label to act as the flyout
+            popup = QLabel(parent or target)
+            popup.setWindowFlag(Qt.WindowType.Tool)
+            popup.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+            popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+            popup.setFrameStyle(QFrame.Shape.Panel.value)
+            popup.setText(f"<b>{title}</b><br>{content}")
+            popup.setStyleSheet("background: #ffffff; border: 1px solid #888; padding: 8px;")
+
+            # Position near the target if available
+            if target is not None:
+                try:
+                    pos = target.mapToGlobal(target.rect().bottomLeft())
+                    popup.move(pos.x(), pos.y())
+                except Exception:
+                    pass
+
+            popup.show()
+
+            # Auto-close after timeout milliseconds
+            timer = QTimer(popup)
+            timer.setSingleShot(True)
+            timer.timeout.connect(popup.close)
+            timer.start(timeout)
+            return popup
+        except Exception:
+            # Fallback: print to console
+            try:
+                print(f"{title}: {content}")
+            except Exception:
+                pass
+            return None
 
 
-class LineEdit(QWidget):
+class TableWidget(QTableWidget):
+    """Thin wrapper around QTableWidget so code expecting the original
+    qfluentwidgets.TableWidget can call methods like horizontalHeader().
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Minimal defaults that the app may rely on
+        try:
+            self.setColumnCount(0)
+            self.setRowCount(0)
+        except Exception:
+            pass
+
+
+class LineEdit(QLineEdit):
     pass
 
 
@@ -423,38 +543,42 @@ class SearchLineEdit(LineEdit):
     pass
 
 
-class BodyLabel(QWidget):
+class BodyLabel(QLabel):
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+
+
+
+class TextEdit(QTextEdit):
     pass
 
 
-class TextEdit(QWidget):
-    pass
-
-
-class SwitchButton(QWidget):
-    pass
+class SwitchButton(QCheckBox):
+    def __init__(self, text: str = ''):
+        super().__init__(text)
 
 
 class ExpandLayout(QVBoxLayout):
     pass
 
 
-class ComboBox(QWidget):
+class ComboBox(QComboBox):
     pass
 
 
-class TransparentToolButton(QPushButton):
+class TransparentToolButton(PushButton):
     pass
 
 
-class NavigationItemPosition(Enum):
-    LEFT = 1
-    RIGHT = 2
-    TOP = 3
-    BOTTOM = 4
+class SubtitleLabel(QLabel):
+    pass
 
 
-class SubtitleLabel(QWidget):
+class StrongBodyLabel(QLabel):
+    pass
+
+
+class PrimaryPushButton(PushButton):
     pass
 
 
@@ -465,745 +589,16 @@ class IconWidget(QWidget):
         return
 
 
-def getIconColor(icon_name: str) -> str:
-    return '#000000'
-
-
 def setFont(*args, **kwargs):
     return None
 
 
-class FluentWindow(QMainWindow):
-    """Minimal main window with a left navigation rail and a central stacked area.
-
-    Exposes:
-    - titleBar: a QFrame placeholder
-    - _nav_rail: the left rail (QFrame)
-    - _stacked: QStackedWidget for pages
-    - navigationInterface: object with addItem/addSeparator/setCurrentItem
-
-    addSubInterface(widget, icon, label) will add the widget to the stacked area
-    and create a nav button for it.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        # title bar placeholder
-        self.titleBar = QFrame(self)
-        try:
-            tl = QHBoxLayout(self.titleBar)
-            tl.setContentsMargins(6, 4, 6, 4)
-            tl.setSpacing(8)
-            self.titleBar.setLayout(tl)
-        except Exception:
-            pass
-
-        # central wrapper
-        central = QWidget(self)
-        central_layout = QHBoxLayout(central)
-        central_layout.setContentsMargins(0, 0, 0, 0)
-        central_layout.setSpacing(0)
-
-        # nav rail
-        self._nav_rail = QFrame(central)
-        self._nav_layout = QVBoxLayout(self._nav_rail)
-        self._nav_layout.setContentsMargins(6, 6, 6, 6)
-        self._nav_layout.setSpacing(6)
-        # Make sure nav rail has visible width
-        try:
-            self._nav_rail.setFixedWidth(180)
-            self._nav_rail.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        except Exception:
-            try:
-                self._nav_rail.setMinimumWidth(160)
-            except Exception:
-                pass
-
-        # stacked content
-        self._stacked = QStackedWidget(central)
-
-        central_layout.addWidget(self._nav_rail)
-        central_layout.addWidget(self._stacked, 1)
-        central.setLayout(central_layout)
-
-        # wrapper with titleBar on top
-        wrapper = QWidget(self)
-        w_layout = QVBoxLayout(wrapper)
-        w_layout.setContentsMargins(0, 0, 0, 0)
-        w_layout.setSpacing(0)
-        w_layout.addWidget(self.titleBar)
-        w_layout.addWidget(central, 1)
-        wrapper.setLayout(w_layout)
-        self.setCentralWidget(wrapper)
-
-        # navigation interface
-        self.navigationInterface = self._make_nav_interface()
-
-    def _make_nav_interface(self):
-        parent = self
-
-        class NavInterface:
-            def __init__(self, parent):
-                self.parent = parent
-                self.items = []
-                self._items_by_id = {}
-
-            def addItem(self, id_, icon, label, position=None, onClick: Optional[Callable] = None, **kwargs):
-                btn = PushButton(label)
-                try:
-                    btn.setObjectName(id_)
-                    btn.setFixedHeight(34)
-                    btn.setMinimumWidth(120)
-                    btn.setStyleSheet('text-align: left; padding-left: 8px;')
-                except Exception:
-                    pass
-
-                try:
-                    self.parent._nav_layout.addWidget(btn)
-                except Exception:
-                    pass
-
-                if onClick is not None:
-                    try:
-                        btn.clicked.connect(onClick)
-                    except Exception:
-                        pass
-
-                try:
-                    btn.show()
-                    btn.setVisible(True)
-                except Exception:
-                    pass
-
-                self.items.append(btn)
-                self._items_by_id[id_] = btn
-                return btn
-
-            def addSeparator(self):
-                spacer = QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-                try:
-                    self.parent._nav_layout.addItem(spacer)
-                except Exception:
-                    pass
-
-            def setCurrentItem(self, id_or_name):
-                try:
-                    for idx in range(self.parent._stacked.count()):
-                        w = self.parent._stacked.widget(idx)
-                        if w.objectName() == id_or_name:
-                            self.parent._stacked.setCurrentIndex(idx)
-                            return
-                except Exception:
-                    pass
-
-        return NavInterface(parent)
-
-    def addSubInterface(self, widget: QWidget, icon: QIcon, label: str):
-        try:
-            if not widget.objectName():
-                widget.setObjectName(label)
-        except Exception:
-            pass
-
-        self._stacked.addWidget(widget)
-
-        def _cb(w=widget):
-            idx = self._stacked.indexOf(w)
-            if idx >= 0:
-                self._stacked.setCurrentIndex(idx)
-
-        try:
-            id_name = widget.objectName() or label
-            self.navigationInterface.addItem(id_name, icon, label, onClick=_cb)
-        except Exception:
-            try:
-                btn = PushButton(label)
-                btn.setObjectName(id_name)
-                btn.setParent(self._nav_rail)
-                self._nav_layout.addWidget(btn)
-                btn.clicked.connect(_cb)
-            except Exception:
-                pass
-
-
-class InfoBar(QWidget):
-    pass
-
-
-class InfoBarPosition(Enum):
-    TOP = 1
-    BOTTOM = 2
-
-
-class Theme(Enum):
-    LIGHT = 'light'
-    DARK = 'dark'
-
-
-_current_theme = Theme.LIGHT
-
-
-def setTheme(theme: Theme | str):
-    global _current_theme
-    if isinstance(theme, str):
-        theme = Theme[theme.upper()] if theme.upper() in Theme.__members__ else Theme.LIGHT
-    _current_theme = theme
-
-
-def isDarkTheme() -> bool:
-    return _current_theme == Theme.DARK
-
-
 __all__ = [
-    'LineEdit', 'PushButton', 'BodyLabel', 'TextEdit', 'FluentIcon',
-    'FIF', 'SwitchButton', 'ExpandLayout', 'ComboBox', 'TransparentToolButton',
-    'FluentWindow', 'NavigationItemPosition', 'SubtitleLabel', 'setFont',
-    'InfoBar', 'InfoBarPosition', 'IconWidget', 'Theme', 'setTheme', 'isDarkTheme',
-    'TableWidget', 'SearchLineEdit', 'FluentTranslator', 'Dialog', 'ToolButton',
-    'MessageBox', 'getIconColor'
-]
-
-# Backwards compat alias used by imports in the repo
-FIF = FluentIcon
-    def _make_nav_interface(self):
-        parent = self
-        class NavInterface:
-            def __init__(self, parent):
-                self.parent = parent
-                self.items = []
-                self._items_by_id = {}
-                self._current = None
-
-            def addItem(self, id_, icon, label, position=None, onClick=None, **kwargs):
-                btn = PushButton(label)
-                try:
-                    btn.setObjectName(id_)
-                    btn.setFixedHeight(34)
-                    btn.setMinimumWidth(120)
-                    btn.setStyleSheet('text-align: left; padding-left: 8px;')
-                except Exception:
-                    pass
-
-                try:
-                    if hasattr(self.parent, '_nav_rail') and self.parent._nav_rail is not None:
-                        try:
-                            btn.setParent(self.parent._nav_rail)
-                        except Exception:
-                            pass
-                    if hasattr(self.parent, '_nav_layout') and self.parent._nav_layout is not None:
-                        try:
-                            self.parent._nav_layout.addWidget(btn)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-                try:
-                    if onClick is not None:
-                        btn.clicked.connect(onClick)
-                except Exception:
-                    pass
-
-                try:
-                    btn.show()
-                    btn.setVisible(True)
-                except Exception:
-                    pass
-
-                self.items.append(btn)
-                self._items_by_id[id_] = btn
-                return btn
-
-            def addSeparator(self):
-                try:
-                    if hasattr(self.parent, '_nav_layout') and self.parent._nav_layout is not None:
-                        from PyQt6.QtWidgets import QSpacerItem
-                        spacer = QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-                        self.parent._nav_layout.addItem(spacer)
-                except Exception:
-                    pass
-                return None
-
-            def setCurrentItem(self, id_or_name):
-                try:
-                    self._current = id_or_name
-                    if hasattr(self.parent, '_stacked') and self.parent._stacked is not None:
-                        for idx in range(self.parent._stacked.count()):
-                            w = self.parent._stacked.widget(idx)
-                            if w.objectName() == id_or_name:
-                                self.parent._stacked.setCurrentIndex(idx)
-                                return
-                    btn = self._items_by_id.get(id_or_name)
-                    if btn is not None:
-                        try:
-                            btn.click()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-        return NavInterface(parent)
-
-class InfoBar(QWidget):
-    pass
-
-class InfoBarPosition(Enum):
-    TOP = 1
-    BOTTOM = 2
-
-class Theme(Enum):
-    LIGHT = 'light'
-    DARK = 'dark'
-
-_current_theme = Theme.LIGHT
-
-def setTheme(theme: Theme | str):
-    global _current_theme
-    if isinstance(theme, str):
-        theme = Theme(theme.upper()) if theme.upper() in Theme.__members__ else Theme.LIGHT
-    _current_theme = theme
-
-def isDarkTheme() -> bool:
-    return _current_theme == Theme.DARK
-
-__all__ = [
-    'LineEdit', 'PushButton', 'BodyLabel', 'StrongBodyLabel', 'FluentIcon',
-    'FIF', 'TextEdit', 'SwitchButton', 'ExpandLayout', 'ComboBox',
-    'TransparentToolButton', 'FluentWindow', 'NavigationItemPosition',
-    'SubtitleLabel', 'setFont', 'InfoBar', 'InfoBarPosition', 'IconWidget',
-    'Theme', 'setTheme', 'isDarkTheme', 'TableWidget', 'SearchLineEdit',
-    'FluentTranslator', 'Dialog', 'ToolButton', 'MessageBox', 'getIconColor',
-    'PrimaryPushButton'
-]
-
-FIF = FluentIcon
-from PyQt6.QtWidgets import (
-    QPushButton, QLabel, QLineEdit, QTextEdit, QCheckBox, QComboBox,
-    QVBoxLayout, QWidget, QMainWindow, QTableWidget, QTableWidgetItem, QHeaderView,
-        try:
-            class _NavInterface:
-                def __init__(self, parent):
-                    self.parent = parent
-                    self.items = []
-                    self._items_by_id = {}
-                    self._current = None
-
-                def addItem(self, id_, icon, label, position=None, onClick=None, **kwargs):
-                    btn = PushButton(label)
-                    # Basic styling/size so text is visible
-                    try:
-                        btn.setObjectName(id_)
-                        btn.setFixedHeight(32)
-                        btn.setMinimumWidth(120)
-                        btn.setStyleSheet('text-align: left; padding-left: 10px;')
-                    except Exception:
-                        pass
-
-                    from PyQt6.QtWidgets import (
-                        QPushButton, QLabel, QLineEdit, QTextEdit, QCheckBox, QComboBox,
-                        QVBoxLayout, QWidget, QMainWindow, QTableWidget, QTableWidgetItem, QHeaderView,
-                        QFrame, QHBoxLayout, QStackedWidget, QSizePolicy
-                    )
-                    from PyQt6.QtGui import QIcon
-                    from PyQt6.QtCore import QTranslator
-                    from enum import Enum
-
-                    class FluentIcon:
-                        FOLDER = QIcon()
-                        HISTORY = QIcon()
-                        GRID = QIcon()
-                        BRUSH = QIcon()
-                        SEARCH = QIcon()
-                        RINGER = QIcon()
-                        DOCUMENT = QIcon()
-                        RETURN = QIcon()
-                        UPDATE = QIcon()
-                        SETTING = QIcon()
-                        PLAY = QIcon()
-                        PAUSE = QIcon()
-                        CLOSE = QIcon()
-
-                    class FluentTranslator(QTranslator):
-                        def __init__(self):
-                            super().__init__()
-                        def translate(self, context, sourceText, disambiguation=None, n=-1):
-                            return sourceText
-
-                    class Dialog(QWidget):
-                        pass
-
-                    class ToolButton(QPushButton):
-                        pass
-
-                    class MessageBox(QWidget):
-                        @staticmethod
-                        def information(parent, title, text):
-                            return None
-
-                    class TableWidget(QTableWidget):
-                        def __init__(self, *args, **kwargs):
-                            super().__init__(*args, **kwargs)
-                            try:
-                                self.setColumnCount(5)
-                            except Exception:
-                                pass
-
-                    class LineEdit(QLineEdit):
-                        pass
-
-                    class SearchLineEdit(LineEdit):
-                        pass
-
-                    class PushButton(QPushButton):
-                        pass
-
-                    class PrimaryPushButton(PushButton):
-                        pass
-
-                    class BodyLabel(QLabel):
-                        pass
-
-                    class StrongBodyLabel(QLabel):
-                        pass
-
-                    class TextEdit(QTextEdit):
-                        pass
-
-                    class SwitchButton(QCheckBox):
-                        def __init__(self, text=''):
-                            super().__init__(text)
-
-                    class ExpandLayout(QVBoxLayout):
-                        pass
-
-                    class ComboBox(QComboBox):
-                        pass
-
-                    class TransparentToolButton(QPushButton):
-                        pass
-
-                    class NavigationItemPosition(Enum):
-                        LEFT = 1
-                        RIGHT = 2
-                        TOP = 3
-                        BOTTOM = 4
-
-                    class SubtitleLabel(QLabel):
-                        pass
-
-                    class IconWidget(QLabel):
-                        def __init__(self, icon=None, parent=None):
-                            super().__init__(parent)
-                            if icon is not None:
-                                try:
-                                    self.setPixmap(icon.pixmap(16, 16))
-                                except Exception:
-                                    pass
-
-                    def getIconColor(icon_name):
-                        return '#000000'
-
-                    def setFont(*args, **kwargs):
-                        return None
-
-                    class FluentWindow(QMainWindow):
-                        def __init__(self, *args, **kwargs):
-                            super().__init__(*args, **kwargs)
-
-                            # Title bar placeholder
-                            self.titleBar = QFrame(self)
-                            try:
-                                tl = QHBoxLayout(self.titleBar)
-                                tl.setContentsMargins(6, 4, 6, 4)
-                                tl.setSpacing(8)
-                                self.titleBar.setLayout(tl)
-                            except Exception:
-                                pass
-
-                            # Central area with nav rail and stacked pages
-                            central = QWidget(self)
-                            central_layout = QHBoxLayout(central)
-                            central_layout.setContentsMargins(0, 0, 0, 0)
-                            central_layout.setSpacing(0)
-
-                            # Navigation rail
-                            self._nav_rail = QFrame(central)
-                            try:
-                                self._nav_layout = QVBoxLayout(self._nav_rail)
-                                self._nav_layout.setContentsMargins(6, 6, 6, 6)
-                                self._nav_layout.setSpacing(6)
-                                self._nav_rail.setLayout(self._nav_layout)
-                                # Fixed width so it is always visible
-                                try:
-                                    self._nav_rail.setFixedWidth(180)
-                                    self._nav_rail.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-                                except Exception:
-                                    try:
-                                        self._nav_rail.setMinimumWidth(160)
-                                    except Exception:
-                                        pass
-                                try:
-                                    self._nav_rail.setFrameShape(QFrame.Shape.StyledPanel)
-                                    self._nav_rail.setStyleSheet('background-color: rgba(250,250,250,1);')
-                                except Exception:
-                                    pass
-                            except Exception:
-                                self._nav_layout = None
-
-                            # Stacked content
-                            try:
-                                self._stacked = QStackedWidget(central)
-                            except Exception:
-                                self._stacked = None
-
-                            try:
-                                central_layout.addWidget(self._nav_rail)
-                                central_layout.addWidget(self._stacked, 1)
-                                try:
-                                    central_layout.setStretch(0, 0)
-                                    central_layout.setStretch(1, 1)
-                                except Exception:
-                                    pass
-                            except Exception:
-                                pass
-
-                            wrapper = QWidget(self)
-                            try:
-                                from PyQt6.QtWidgets import QVBoxLayout
-                                w_layout = QVBoxLayout(wrapper)
-                                w_layout.setContentsMargins(0, 0, 0, 0)
-                                w_layout.setSpacing(0)
-                                w_layout.addWidget(self.titleBar)
-                                w_layout.addWidget(central, 1)
-                                wrapper.setLayout(w_layout)
-                                self.setCentralWidget(wrapper)
-                            except Exception:
-                                try:
-                                    self.setCentralWidget(central)
-                                except Exception:
-                                    pass
-
-                            # Navigation interface
-                            self.navigationInterface = self._make_nav_interface()
-
-                        def _make_nav_interface(self):
-                            parent = self
-                            class NavInterface:
-                                def __init__(self, parent):
-                                    self.parent = parent
-                                    self.items = []
-                                    self._items_by_id = {}
-                                    self._current = None
-
-                                def addItem(self, id_, icon, label, position=None, onClick=None, **kwargs):
-                                    btn = PushButton(label)
-                                    try:
-                                        btn.setObjectName(id_)
-                                        btn.setFixedHeight(34)
-                                        btn.setMinimumWidth(120)
-                                        btn.setStyleSheet('text-align: left; padding-left: 8px;')
-                                    except Exception:
-                                        pass
-
-                                    try:
-                                        if hasattr(self.parent, '_nav_rail') and self.parent._nav_rail is not None:
-                                            try:
-                                                btn.setParent(self.parent._nav_rail)
-                                            except Exception:
-                                                pass
-                                        if hasattr(self.parent, '_nav_layout') and self.parent._nav_layout is not None:
-                                            try:
-                                                self.parent._nav_layout.addWidget(btn)
-                                            except Exception:
-                                                pass
-                                    except Exception:
-                                        pass
-
-                                    try:
-                                        if onClick is not None:
-                                            btn.clicked.connect(onClick)
-                                    except Exception:
-                                        pass
-
-                                    try:
-                                        btn.show()
-                                        btn.setVisible(True)
-                                    except Exception:
-                                        pass
-
-                                    self.items.append(btn)
-                                    self._items_by_id[id_] = btn
-                                    return btn
-
-                                def addSeparator(self):
-                                    try:
-                                        if hasattr(self.parent, '_nav_layout') and self.parent._nav_layout is not None:
-                                            from PyQt6.QtWidgets import QSpacerItem
-                                            spacer = QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-                                            self.parent._nav_layout.addItem(spacer)
-                                    except Exception:
-                                        pass
-                                    return None
-
-                                def setCurrentItem(self, id_or_name):
-                                    try:
-                                        self._current = id_or_name
-                                        if hasattr(self.parent, '_stacked') and self.parent._stacked is not None:
-                                            for idx in range(self.parent._stacked.count()):
-                                                w = self.parent._stacked.widget(idx)
-                                                if w.objectName() == id_or_name:
-                                                    self.parent._stacked.setCurrentIndex(idx)
-                                                    return
-                                        btn = self._items_by_id.get(id_or_name)
-                                        if btn is not None:
-                                            try:
-                                                btn.click()
-                                            except Exception:
-                                                pass
-                                    except Exception:
-                                        pass
-
-                            return NavInterface(parent)
-
-                    class InfoBar(QWidget):
-                        pass
-
-                    class InfoBarPosition(Enum):
-                        TOP = 1
-                        BOTTOM = 2
-
-                    class Theme(Enum):
-                        LIGHT = 'light'
-                        DARK = 'dark'
-
-                    _current_theme = Theme.LIGHT
-
-                    def setTheme(theme: Theme | str):
-                        global _current_theme
-                        if isinstance(theme, str):
-                            theme = Theme(theme.upper()) if theme.upper() in Theme.__members__ else Theme.LIGHT
-                        _current_theme = theme
-
-                    def isDarkTheme() -> bool:
-                        return _current_theme == Theme.DARK
-
-                    __all__ = [
-                        'LineEdit', 'PushButton', 'BodyLabel', 'StrongBodyLabel', 'FluentIcon',
-                        'FIF', 'TextEdit', 'SwitchButton', 'ExpandLayout', 'ComboBox',
-                        'TransparentToolButton', 'FluentWindow', 'NavigationItemPosition',
-                        'SubtitleLabel', 'setFont', 'InfoBar', 'InfoBarPosition', 'IconWidget',
-                        'Theme', 'setTheme', 'isDarkTheme', 'TableWidget', 'SearchLineEdit',
-                        'FluentTranslator', 'Dialog', 'ToolButton', 'MessageBox', 'getIconColor',
-                        'PrimaryPushButton'
-                    ]
-
-                    FIF = FluentIcon
-                                                pass
-    def addSubInterface(self, widget, icon, label):
-        """Add a widget as a page in the stacked content area. The label is
-        used as a fallback objectName so pages can be selected by nav id/name.
-        """
-        try:
-            if widget.objectName() == '':
-                widget.setObjectName(label)
-        except Exception:
-            try:
-                widget.setObjectName(label)
-            except Exception:
-                pass
-        try:
-            if hasattr(self, '_stacked') and self._stacked is not None:
-                self._stacked.addWidget(widget)
-                # If this is the first page, show it
-                try:
-                    if self._stacked.count() == 1:
-                        self._stacked.setCurrentIndex(0)
-                except Exception:
-                    pass
-                # Also create a navigation item for this subinterface so the
-                # application's calls to addSubInterface behave like the real
-                # qfluentwidgets: navigation entries are created automatically.
-                try:
-                    id_name = widget.objectName() or label
-                    # define a click callback which sets the stacked page
-                    def _make_callback(w=widget):
-                        def _cb():
-                            try:
-                                if hasattr(self, '_stacked') and self._stacked is not None:
-                                    idx = self._stacked.indexOf(w)
-                                    if idx >= 0:
-                                        self._stacked.setCurrentIndex(idx)
-                            except Exception:
-                                pass
-                        return _cb
-
-                    try:
-                        # Use navigationInterface if available, otherwise directly add a button
-                        if hasattr(self, 'navigationInterface') and self.navigationInterface is not None:
-                            self.navigationInterface.addItem(id_name, icon, label, onClick=_make_callback())
-                        else:
-                            # fallback: add a simple button to nav rail
-                            btn = PushButton(label)
-                            try:
-                                btn.setObjectName(id_name)
-                                if hasattr(self, '_nav_layout') and self._nav_layout is not None:
-                                    self._nav_layout.addWidget(btn)
-                                try:
-                                    btn.clicked.connect(_make_callback())
-                                except Exception:
-                                    pass
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-        except Exception:
-            # best-effort: set parent so it at least exists in the widget hierarchy
-            try:
-                widget.setParent(self)
-            except Exception:
-                pass
-
-
-class InfoBar(QWidget):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-
-class InfoBarPosition(Enum):
-    TOP = 1
-    BOTTOM = 2
-
-
-# Minimal theme support used by some views
-class Theme(Enum):
-    LIGHT = 'light'
-    DARK = 'dark'
-
-
-_current_theme = Theme.LIGHT
-
-def setTheme(theme: Theme | str):
-    global _current_theme
-    if isinstance(theme, str):
-        theme = Theme(theme.upper()) if theme.upper() in Theme.__members__ else Theme.LIGHT
-    _current_theme = theme
-
-
-def isDarkTheme() -> bool:
-    return _current_theme == Theme.DARK
-
-
-__all__ = [
-    'LineEdit', 'PushButton', 'BodyLabel', 'StrongBodyLabel', 'FluentIcon',
-    'FIF', 'TextEdit', 'SwitchButton', 'ExpandLayout', 'ComboBox',
-    'TransparentToolButton', 'FluentWindow', 'NavigationItemPosition',
-    'SubtitleLabel', 'setFont', 'InfoBar', 'InfoBarPosition', 'IconWidget',
-    'Theme', 'setTheme', 'isDarkTheme', 'TableWidget', 'SearchLineEdit',
-    'FluentTranslator', 'Dialog', 'ToolButton', 'MessageBox', 'getIconColor',
-    'PrimaryPushButton'
+    'FluentWindow', 'FluentIcon', 'PushButton', 'FluentTranslator', 'NavigationItemPosition',
+    'getIconColor', 'Theme', 'setTheme', 'isDarkTheme', 'Dialog', 'ToolButton', 'MessageBox',
+    'TableWidget', 'LineEdit', 'SearchLineEdit', 'BodyLabel', 'TextEdit', 'SwitchButton',
+    'ExpandLayout', 'ComboBox', 'TransparentToolButton', 'SubtitleLabel', 'IconWidget', 'setFont',
+    'InfoBar', 'InfoBarPosition', 'FIF'
 ]
 
 # Backwards compat name used in imports

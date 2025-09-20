@@ -432,3 +432,62 @@ class ConfigDialog(QDialog):
         if app_settings:
             app_settings.set_setting("notification_unread_color", self._unread_color)
             app_settings.set_setting("notification_read_color", self._read_color)
+
+    def _open_folder(self, path: str):
+        """Open a folder in the system file explorer in a cross-platform way.
+
+        This method is used by the ConfigDialog buttons to open the DB/logs/app data
+        folders. It is intentionally small and robust: errors are logged and shown
+        in the dialog's error label instead of throwing exceptions back to callers.
+        """
+        import subprocess
+        import os
+        import sys
+        try:
+            if not path:
+                raise ValueError('Path is empty')
+
+            # Normalize and ensure the path exists; create logs dir if missing
+            path = os.path.abspath(os.path.expanduser(path))
+            if not os.path.exists(path):
+                try:
+                    os.makedirs(path, exist_ok=True)
+                except Exception:
+                    # If we cannot create the folder, log and show error
+                    logger.exception('Unable to create path: %s', path)
+                    self.show_error(f"Impossibile aprire o creare la cartella: {path}")
+                    return
+
+            # Windows: prefer os.startfile which correctly handles directories and UNC paths
+            if os.name == 'nt':
+                try:
+                    os.startfile(path)
+                except Exception:
+                    # Fallback to explorer if startfile fails
+                    subprocess.Popen(['explorer', path], shell=False)
+            # macOS
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', path])
+            # Linux / others
+            else:
+                # Try xdg-open which is common on modern Linux
+                try:
+                    subprocess.Popen(['xdg-open', path])
+                except Exception:
+                    # Fallback: open with file manager (nautilus, dolphin, thunar)
+                    for cmd in (('nautilus',), ('dolphin',), ('thunar',)):
+                        try:
+                            subprocess.Popen(list(cmd) + [path])
+                            return
+                        except Exception:
+                            continue
+                    # Last resort: log and show error
+                    logger.exception('Failed to open folder: %s', path)
+                    self.show_error(f"Impossibile aprire la cartella: {path}")
+        except Exception:
+            logger.exception('Error opening folder: %s', path)
+            try:
+                self.show_error(f"Impossibile aprire la cartella: {path}")
+            except Exception:
+                # If show_error fails, there's nothing else to do safely here
+                pass

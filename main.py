@@ -132,6 +132,12 @@ def exception_handler(exc_type, exc_value, exc_traceback):
     error_details = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
     
     msg_box = QMessageBox()
+    try:
+        # Ensure the message box is shown on top of other windows
+        msg_box.setWindowFlag(QMessageBox.WindowType.WindowStaysOnTopHint, True)
+    except Exception:
+        # setWindowFlag may not be available on some Qt wrappers; ignore safely
+        pass
     msg_box.setWindowTitle("Errore nell'applicazione")
     msg_box.setText("Si è verificato un errore imprevisto nell'applicazione.")
     msg_box.setInformativeText(error_msg)
@@ -241,11 +247,19 @@ def main():
     except Exception as e:
         logger.error(f"Could not connect to Jira on startup: {e}", exc_info=True)
         # Mostra un messaggio di errore non bloccante
-        QMessageBox.warning(
-            None, 
-            "Errore di connessione",
-            f"Impossibile connettersi a Jira: {str(e)}\n\nL'applicazione funzionerà in modalità disconnessa."
-        )
+        try:
+            warning_box = QMessageBox()
+            try:
+                warning_box.setWindowFlag(QMessageBox.WindowType.WindowStaysOnTopHint, True)
+            except Exception:
+                pass
+            warning_box.setIcon(QMessageBox.Icon.Warning)
+            warning_box.setWindowTitle("Errore di connessione")
+            warning_box.setText(f"Impossibile connettersi a Jira: {str(e)}\n\nL'applicazione funzionerà in modalità disconnessa.")
+            warning_box.exec()
+        except Exception:
+            # Final fallback: log and continue (do not crash the app because of UI errors)
+            logger.exception('Failed to show connection warning dialog')
     
     # 4. Setup main window and controller (MVC)
     main_window = MainWindow()
