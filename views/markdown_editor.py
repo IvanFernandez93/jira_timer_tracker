@@ -15,9 +15,10 @@ class MarkdownEditor(QWidget):
     
     textChanged = pyqtSignal()
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, show_toolbar: bool = True):
         super().__init__(parent)
         self.preview_mode = 0  # 0: edit only, 1: edit + preview side by side
+        self.show_toolbar = show_toolbar
         self.setup_ui()
         self.setup_connections()
     
@@ -27,9 +28,10 @@ class MarkdownEditor(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
         
-        # Create toolbar
-        self.toolbar = self.create_toolbar()
-        layout.addWidget(self.toolbar)
+        # Create toolbar (only if requested)
+        if self.show_toolbar:
+            self.toolbar = self.create_toolbar()
+            layout.addWidget(self.toolbar)
         
         # Create main container
         self.main_container = QWidget()
@@ -153,21 +155,27 @@ class MarkdownEditor(QWidget):
     
     def setup_connections(self):
         """Set up signal connections."""
-        self.bold_btn.clicked.connect(self.toggle_bold)
-        self.italic_btn.clicked.connect(self.toggle_italic)
-        self.underline_btn.clicked.connect(self.toggle_strikethrough)
-        
-        self.h1_btn.clicked.connect(lambda: self.insert_header(1))
-        self.h2_btn.clicked.connect(lambda: self.insert_header(2))
-        self.h3_btn.clicked.connect(lambda: self.insert_header(3))
-        
-        self.bullet_btn.clicked.connect(self.insert_bullet_list)
-        self.number_btn.clicked.connect(self.insert_numbered_list)
-        
-        self.code_btn.clicked.connect(self.toggle_inline_code)
-        self.link_btn.clicked.connect(self.insert_link)
-        self.preview_btn.clicked.connect(self.toggle_preview)
-        
+        # Only wire toolbar-related signals if the toolbar exists
+        if getattr(self, 'show_toolbar', True):
+            try:
+                self.bold_btn.clicked.connect(self.toggle_bold)
+                self.italic_btn.clicked.connect(self.toggle_italic)
+                self.underline_btn.clicked.connect(self.toggle_strikethrough)
+
+                self.h1_btn.clicked.connect(lambda: self.insert_header(1))
+                self.h2_btn.clicked.connect(lambda: self.insert_header(2))
+                self.h3_btn.clicked.connect(lambda: self.insert_header(3))
+
+                self.bullet_btn.clicked.connect(self.insert_bullet_list)
+                self.number_btn.clicked.connect(self.insert_numbered_list)
+
+                self.code_btn.clicked.connect(self.toggle_inline_code)
+                self.link_btn.clicked.connect(self.insert_link)
+                self.preview_btn.clicked.connect(self.toggle_preview)
+            except Exception:
+                # Best-effort: if toolbar buttons are missing, continue without them
+                pass
+
         # Forward text changed signal
         self.editor.textChanged.connect(self.textChanged.emit)
         self.editor.textChanged.connect(self._update_preview)

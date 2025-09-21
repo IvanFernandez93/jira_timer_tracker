@@ -167,15 +167,15 @@ class JiraDetailController(QObject):
         self._current_note_title = None # Track the title of the active note
         
         self._connect_signals()
-        self._setup_autosave_timer() # Setup the timer once
-        
+        self._setup_autosave_timer()  # Setup the timer once
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_display)
-        self.timer.setInterval(1000) # 1 second
+        self.timer.setInterval(1000)  # 1 second
 
         self.is_running = False
         self.total_seconds_tracked = self.db_service.get_local_time(self.jira_key)
-        self._update_display() # Show initial time
+        self._update_display()  # Show initial time
 
     def _connect_signals(self):
         self.view.start_pause_btn.clicked.connect(self._toggle_timer)
@@ -434,9 +434,55 @@ class JiraDetailController(QObject):
         if self.view.notes_tab_widget.count() > 0:
             self._handle_note_tab_change(0)
 
+    def _setup_autosave_timer(self):
+        """Create a single-shot autosave timer (debounce) for note editing.
+
+        The timer is started by textChanged signals and will call
+        _save_current_note after a short delay.
+        """
+        try:
+            # 2 second debounce
+            self.autosave_timer = QTimer(self)
+            self.autosave_timer.setSingleShot(True)
+            self.autosave_timer.setInterval(2000)
+            self.autosave_timer.timeout.connect(self._save_current_note)
+        except Exception:
+            # Ensure controller still initializes even if timers are unavailable
+            if hasattr(self, 'autosave_timer'):
+                delattr(self, 'autosave_timer')
+
+    def _save_current_note(self):
+        """Save the currently active note to the DB safely.
+
+        Supports both MarkdownEditor and QTextEdit. Uses the
+        controller's db_service.save_annotation API.
+        """
+        try:
+            if not self._active_note_editor or not self._current_note_title:
+                return
+
+            content = ""
+            # MarkdownEditor compatibility
+            if hasattr(self._active_note_editor, 'toMarkdown'):
+                content = self._active_note_editor.toMarkdown()
+            elif hasattr(self._active_note_editor, 'toPlainText'):
+                content = self._active_note_editor.toPlainText()
+            else:
+                # Fallback: try grabbing textCursor contents
+                try:
+                    content = self._active_note_editor.document().toPlainText()
+                except Exception:
+                    content = ""
+
+            # Persist to DB
+            self.db_service.save_annotation(self.jira_key, self._current_note_title, content)
+        except Exception:
+            # Best-effort save; do not raise from UI timer
+            pass
+
     def _create_note_tab(self, title, content):
         """Helper to create a new tab with a markdown editor."""
-        editor = MarkdownEditor()
+        editor = MarkdownEditor(show_toolbar=False)
         editor.setMarkdown(content)
         editor.setPlaceholderText("Your private notes (Markdown supported)...")
         
@@ -539,20 +585,109 @@ class JiraDetailController(QObject):
                 self._active_note_editor.textChanged.connect(self.autosave_timer.start)
                 self._active_note_editor.textChanged.connect(self._save_current_note)
 
-    def _setup_autosave_timer(self):
-        """Sets up a single timer for auto-saving the active annotation."""
-        self.autosave_timer = QTimer()
-        self.autosave_timer.setSingleShot(True)
-        self.autosave_timer.setInterval(3000) # 3 seconds
-        self.autosave_timer.timeout.connect(self._save_current_note)
+            # Wire the top toolbar buttons to the new active editor
+            try:
+                self._wire_toolbar_actions_for_editor(self._active_note_editor)
+            except Exception:
+                pass
 
-    def _save_current_note(self):
-        """Saves the content of the currently active annotation editor."""
-        if not self._active_note_editor or not self._current_note_title:
-            return
-            
-        content = self._active_note_editor.toMarkdown()
-        self.db_service.save_annotation(self.jira_key, self._current_note_title, content)
+    def _wire_toolbar_actions_for_editor(self, editor):
+        """Connects the JiraDetailView toolbar buttons to the provided editor.
+
+        This supports both MarkdownEditor (which exposes API methods) and plain
+        QTextEdit. Connections are replaced atomically to avoid duplicate handlers.
+        """
+        view = self.view
+
+        # Helper wrappers that operate on the editor safely
+        def wrap_selection(prefix, suffix=None):
+            try:
+                if hasattr(editor, 'wrap_selection'):
+                    # MarkdownEditor API
+                    if suffix is None:
+                        editor.wrap_selection(prefix)
+                    else:
+                        editor.wrap_selection(prefix, suffix)
+                elif hasattr(editor, 'toggle_bold') and prefix == '**':
+                    editor.toggle_bold()
+                else:
+                    # Fallback for QTextEdit: insert markers around selection
+                    tc = editor.textCursor()
+                    if tc.hasSelection():
+                        sel = tc.selectedText()
+                        suffix = suffix if suffix is not None else prefix
+                        tc.insertText(f"{prefix}{sel}{suffix}")
+                    else:
+                        suffix = suffix if suffix is not None else prefix
+                        tc.insertText(f"{prefix}{suffix}")
+            except Exception:
+                pass
+
+        def insert_bullet():
+            try:
+                if hasattr(editor, 'insert_bullet_list'):
+                    editor.insert_bullet_list()
+                else:
+                    tc = editor.textCursor()
+                    tc.movePosition(tc.MoveOperation.StartOfLine)
+                    tc.insertText('- ')
+                    editor.setTextCursor(tc)
+            except Exception:
+                pass
+
+        def prefix_line(prefix):
+            try:
+                if hasattr(editor, 'insert_header'):
+                    # MarkdownEditor has insert_header(level) - map prefix
+                    level = prefix.count('#')
+                    editor.insert_header(level)
+                else:
+                    tc = editor.textCursor()
+                    tc.movePosition(tc.MoveOperation.StartOfLine)
+                    tc.insertText(prefix)
+                    editor.setTextCursor(tc)
+            except Exception:
+                pass
+
+        # Disconnect previous connections by reassigning slots (best effort)
+        try:
+            view.bold_btn.clicked.disconnect()
+        except Exception:
+            pass
+        try:
+            view.italic_btn.clicked.disconnect()
+        except Exception:
+            pass
+        try:
+            view.code_btn.clicked.disconnect()
+        except Exception:
+            pass
+        try:
+            view.bullet_btn.clicked.disconnect()
+        except Exception:
+            pass
+        try:
+            view.h1_btn.clicked.disconnect()
+            view.h2_btn.clicked.disconnect()
+            view.h3_btn.clicked.disconnect()
+        except Exception:
+            pass
+
+        # Reconnect to the wrappers
+        view.bold_btn.clicked.connect(lambda: wrap_selection('**'))
+        view.italic_btn.clicked.connect(lambda: wrap_selection('*'))
+        view.code_btn.clicked.connect(lambda: wrap_selection('`'))
+        view.bullet_btn.clicked.connect(lambda: insert_bullet())
+        view.h1_btn.clicked.connect(lambda: prefix_line('# '))
+        view.h2_btn.clicked.connect(lambda: prefix_line('## '))
+        view.h3_btn.clicked.connect(lambda: prefix_line('### '))
+
+        # Emoji picker binds to _insert_emoji which already uses notes_tab_widget to find the active editor
+        try:
+            view.emoji_picker_btn.clicked.disconnect()
+        except Exception:
+            pass
+        view.emoji_picker_btn.clicked.connect(lambda: self.view._open_emoji_picker() if hasattr(self.view, '_open_emoji_picker') else None)
 
     def _on_close(self, event):
         """Handler to be called when the window is closed."""

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from enum import Enum
 from typing import Optional, Callable
+import os
 
 from PyQt6.QtWidgets import (
     QWidget, QMainWindow, QFrame, QHBoxLayout, QVBoxLayout,
@@ -32,22 +33,36 @@ class FluentIconMeta(type):
         # placeholder so toolbar buttons are identifiable during development.
         try:
             from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
-            size = 16
+            from PyQt6.QtCore import Qt as _Qt
+            # use a larger size so icons are visible on modern/high-DPI displays
+            size = 32
             pix = QPixmap(size, size)
             # derive a color from the name for variety
             h = abs(hash(name)) % 360
-            color = QColor.fromHsv(h, 180, 220)
+            color = QColor.fromHsv(h, 200, 230)
             pix.fill(color)
 
             painter = QPainter(pix)
             try:
-                painter.setPen(QColor(30, 30, 30))
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+                # draw a subtle circular background to make icons readable against any UI
+                from PyQt6.QtCore import QRectF
+                r = QRectF(2, 2, size-4, size-4)
+                painter.setBrush(color)
+                painter.setPen(QColor(0,0,0,50))  # More prominent border
+                painter.drawEllipse(r)
+                # choose contrasting text color based on luminance
+                l = (color.red() * 0.299 + color.green() * 0.587 + color.blue() * 0.114)
+                text_color = QColor(255, 255, 255) if l < 180 else QColor(0, 0, 0)
+                painter.setPen(text_color)
                 font = QFont()
-                font.setPointSize(10)
+                font.setPointSize(14)
                 font.setBold(True)
                 painter.setFont(font)
                 letter = (name[0].upper() if name else '?')
-                painter.drawText(pix.rect(), int(0x84), letter)
+                rect = pix.rect()
+                painter.drawText(rect, int(_Qt.AlignmentFlag.AlignCenter), letter)
             finally:
                 painter.end()
 
@@ -60,12 +75,19 @@ class FluentIconMeta(type):
         return icon
 
 
+ICON_DIR = os.path.join(os.path.dirname(__file__), '..', 'resources', 'icons')
+def _icon(name, fallback=None):
+    path = os.path.join(ICON_DIR, f"{name}.png")
+    if os.path.exists(path):
+        return QIcon(path)
+    return fallback if fallback else QIcon()
+
 class FluentIcon(metaclass=FluentIconMeta):
     # Common icons used across the app (explicitly listed for clarity)
-    FOLDER = QIcon()
-    HISTORY = QIcon()
-    GRID = QIcon()
-    BRUSH = QIcon()
+    FOLDER = _icon('folder')
+    HISTORY = _icon('history')
+    GRID = _icon('grid')
+    BRUSH = _icon('brush')
     SEARCH = QIcon()
     RINGER = QIcon()
     DOCUMENT = QIcon()
@@ -183,6 +205,24 @@ class PushButton(QPushButton):
 class FluentTranslator(QTranslator):
     def translate(self, context, sourceText, disambiguation=None, n=-1):
         return sourceText
+
+
+class TransparentToolButton(QPushButton):
+    """Simple transparent button used as a lightweight tool button in the shim.
+
+    Provides a flat, icon-only button style similar to the real qfluentwidgets
+    TransparentToolButton so the UI looks acceptable during development.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        try:
+            self.setFlat(True)
+        except Exception:
+            pass
+        try:
+            self.setStyleSheet('border: none; background: transparent;')
+        except Exception:
+            pass
 
 
 def getIconColor(name: str) -> str:
