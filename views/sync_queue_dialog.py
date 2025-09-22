@@ -91,27 +91,44 @@ class SyncQueueDialog(QDialog):
         
     def show_error(self, message):
         """Shows an error message."""
-        InfoBar.error(
-            title="Errore",
-            content=message,
-            orient=Qt.Orientation.Horizontal,
-            isClosable=True,
-            position=InfoBarPosition.TOP,
-            duration=5000,
-            parent=self
-        )
+        try:
+            InfoBar.error(
+                title="Errore",
+                content=message,
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=5000,
+                parent=self
+            )
+        except Exception:
+            try:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.critical(self, "Errore", str(message))
+            except Exception:
+                # Fallback: set error details
+                self.error_label.setVisible(True)
+                self.error_details.setText(str(message))
+                self.error_details.setVisible(True)
         
     def show_info(self, message):
         """Shows an info message."""
-        InfoBar.success(
-            title="Info",
-            content=message,
-            orient=Qt.Orientation.Horizontal,
-            isClosable=True,
-            position=InfoBarPosition.TOP,
-            duration=3000,
-            parent=self
-        )
+        try:
+            InfoBar.success(
+                title="Info",
+                content=message,
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self
+            )
+        except Exception:
+            try:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.information(self, "Info", str(message))
+            except Exception:
+                pass
         
     def show_error_details(self, message):
         """Shows error details at the bottom of the dialog."""

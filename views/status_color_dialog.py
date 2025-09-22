@@ -79,14 +79,21 @@ class StatusColorDialog(QDialog):
         """Adds a new status color to the table."""
         status_name = self.new_status_input.text().strip()
         if not status_name:
-            InfoBar.error(
-                title="Errore",
-                content="Il nome dello stato non può essere vuoto.",
-                orient=Qt.Orientation.Horizontal,
-                isClosable=True,
-                position=InfoBarPosition.TOP,
-                parent=self
-            )
+            try:
+                InfoBar.error(
+                    title="Errore",
+                    content="Il nome dello stato non può essere vuoto.",
+                    orient=Qt.Orientation.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP,
+                    parent=self
+                )
+            except Exception:
+                try:
+                    from PyQt6.QtWidgets import QMessageBox
+                    QMessageBox.critical(self, "Errore", "Il nome dello stato non può essere vuoto.")
+                except Exception:
+                    pass
             return
         
         # Call controller method to add to database

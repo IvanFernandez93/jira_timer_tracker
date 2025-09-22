@@ -175,6 +175,10 @@ def main():
     translator = FluentTranslator()
     app.installTranslator(translator)
 
+    # Initialize icons now that QApplication is ready
+    from qfluentwidgets import init_icons
+    init_icons()
+
     # 1. Initialize all services
     db_service = DatabaseService()
     db_service.initialize_db()

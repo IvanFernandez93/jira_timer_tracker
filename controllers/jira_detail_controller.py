@@ -631,19 +631,25 @@ class JiraDetailController(QObject):
         # MarkdownEditor instances and view-created container widgets.
         def _get_text_edit_target():
             # Return a QTextEdit instance we can operate on directly, or None
+            _logger.debug(f"_get_text_edit_target called for editor type: {type(editor).__name__}")
             try:
                 # If editor is a MarkdownEditor instance with an internal `editor` QTextEdit
                 if hasattr(editor, 'editor') and editor.editor is not None:
+                    _logger.debug("Found MarkdownEditor with internal editor")
                     return editor.editor
                 # If editor itself is a QTextEdit
                 from PyQt6.QtWidgets import QTextEdit
                 if isinstance(editor, QTextEdit):
+                    _logger.debug("Editor is directly a QTextEdit")
                     return editor
                 # If it's a view container exposing .editor attribute
                 if hasattr(editor, 'editor'):
+                    _logger.debug("Found editor attribute on container")
                     return getattr(editor, 'editor')
-            except Exception:
+            except Exception as e:
+                _logger.debug(f"Exception in _get_text_edit_target: {e}")
                 pass
+            _logger.debug("No suitable text edit target found")
             return None
 
         def wrap_selection(prefix, suffix=None):
@@ -651,6 +657,7 @@ class JiraDetailController(QObject):
             try:
                 # Prefer editor-level API when present (MarkdownEditor)
                 if hasattr(editor, 'wrap_selection'):
+                    _logger.debug("Using editor.wrap_selection method")
                     if suffix is None:
                         editor.wrap_selection(prefix)
                     else:
@@ -659,13 +666,16 @@ class JiraDetailController(QObject):
 
                 # Directly operate on QTextEdit as fallback
                 if te is not None:
+                    _logger.debug("Using direct QTextEdit operation")
                     tc = te.textCursor()
                     if suffix is None:
                         suffix = prefix
                     if tc.hasSelection():
                         sel = tc.selectedText()
+                        _logger.debug(f"Selected text: '{sel}'")
                         tc.insertText(f"{prefix}{sel}{suffix}")
                     else:
+                        _logger.debug("No selection, inserting prefix+suffix")
                         # Insert prefix+suffix and move cursor between them
                         start_pos = tc.position()
                         tc.insertText(f"{prefix}{suffix}")
@@ -674,9 +684,10 @@ class JiraDetailController(QObject):
                             tc.movePosition(tc.MoveOperation.Left)
                         te.setTextCursor(tc)
                     te.setFocus()
+                    _logger.debug("Operation completed successfully")
                     return
-            except Exception:
-                _logger.exception("Error in wrap_selection wrapper")
+            except Exception as e:
+                _logger.exception(f"Error in wrap_selection wrapper: {e}")
 
             # Last-resort: call view-level helper
             try:
@@ -838,34 +849,17 @@ class JiraDetailController(QObject):
             pass
 
         # Reconnect to the wrappers
-        def _log_and_call(name, fn):
-            def _inner():
-                try:
-                    tab = None
-                    try:
-                        tab = view.notes_tab_widget.tabText(view.notes_tab_widget.currentIndex())
-                    except Exception:
-                        tab = None
-                    _logger.debug(f"Toolbar click: {name} on tab={tab} editor={type(editor).__name__}")
-                except Exception:
-                    pass
-                try:
-                    return fn()
-                except Exception:
-                    return None
-            return _inner
-
-        view.bold_btn.clicked.connect(_log_and_call('bold', lambda: wrap_selection('**')))
-        view.italic_btn.clicked.connect(_log_and_call('italic', lambda: wrap_selection('*')))
-        view.code_btn.clicked.connect(_log_and_call('code', lambda: wrap_selection('`')))
-        view.bullet_btn.clicked.connect(_log_and_call('bullet', lambda: insert_bullet()))
-        view.h1_btn.clicked.connect(_log_and_call('h1', lambda: prefix_line('# ')))
-        view.h2_btn.clicked.connect(_log_and_call('h2', lambda: prefix_line('## ')))
-        view.h3_btn.clicked.connect(_log_and_call('h3', lambda: prefix_line('### ')))
-        view.underline_btn.clicked.connect(_log_and_call('underline', lambda: wrap_selection('~~')))
-        view.number_btn.clicked.connect(_log_and_call('number', lambda: insert_numbered()))
-        view.link_btn.clicked.connect(_log_and_call('link', lambda: insert_link()))
-        view.preview_btn.clicked.connect(_log_and_call('preview', lambda: toggle_preview()))
+        view.bold_btn.clicked.connect(lambda: wrap_selection('**'))
+        view.italic_btn.clicked.connect(lambda: wrap_selection('*'))
+        view.code_btn.clicked.connect(lambda: wrap_selection('`'))
+        view.bullet_btn.clicked.connect(lambda: insert_bullet())
+        view.h1_btn.clicked.connect(lambda: prefix_line('# '))
+        view.h2_btn.clicked.connect(lambda: prefix_line('## '))
+        view.h3_btn.clicked.connect(lambda: prefix_line('### '))
+        view.underline_btn.clicked.connect(lambda: wrap_selection('~~'))
+        view.number_btn.clicked.connect(lambda: insert_numbered())
+        view.link_btn.clicked.connect(lambda: insert_link())
+        view.preview_btn.clicked.connect(lambda: toggle_preview())
 
         # Emoji picker binds to _insert_emoji which already uses notes_tab_widget to find the active editor
         try:

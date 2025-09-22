@@ -31,7 +31,17 @@ class FluentIconMeta(type):
     def __getattr__(cls, name: str):
         # Create a small colored pixmap with the first letter as a visible
         # placeholder so toolbar buttons are identifiable during development.
+        # But do NOT attempt to construct QPixmap unless a QGuiApplication
+        # already exists. Attempting to create a QPixmap before the
+        # application is constructed triggers a fatal Qt error on startup.
         try:
+            from PyQt6.QtGui import QGuiApplication
+            if QGuiApplication.instance() is None:
+                # Return an empty QIcon as a safe fallback at import time.
+                icon = QIcon()
+                setattr(cls, name, icon)
+                return icon
+
             from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
             from PyQt6.QtCore import Qt as _Qt
             # use a larger size so icons are visible on modern/high-DPI displays
@@ -77,17 +87,143 @@ class FluentIconMeta(type):
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), '..', 'resources', 'icons')
 def _icon(name, fallback=None):
-    path = os.path.join(ICON_DIR, f"{name}.png")
-    if os.path.exists(path):
-        return QIcon(path)
-    return fallback if fallback else QIcon()
+    path_png = os.path.join(ICON_DIR, f"{name}.png")
+    path_svg = os.path.join(ICON_DIR, f"{name}.svg")
+    
+    # Try to load PNG first, then SVG
+    try:
+        if os.path.exists(path_png):
+            return QIcon(path_png)
+        elif os.path.exists(path_svg):
+            return QIcon(path_svg)
+    except Exception:
+        pass
+
+    # No icon file found: generate a visible placeholder icon using Unicode symbols
+    # Only attempt to draw a QPixmap if a QGuiApplication instance exists.
+    try:
+        from PyQt6.QtGui import QGuiApplication
+        if QGuiApplication.instance() is None:
+            # Safe fallback at import time
+            return fallback if fallback else QIcon()
+
+        from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont, QBrush, QPen
+        from PyQt6.QtCore import Qt as _Qt, QRect
+
+        size = 24  # Optimal size for toolbar buttons
+        pix = QPixmap(size, size)
+        pix.fill(QColor(0, 0, 0, 0))  # Transparent background
+
+        painter = QPainter(pix)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+            
+            # Map icon names to Unicode symbols for better recognition
+            unicode_symbols = {
+                'brush': '🖌',
+                'checkbox': '☑',
+                'check': '✓',
+                'edit': '✏',
+                'delete': '🗑',
+                'folder': '📁',
+                'history': '🕒',
+                'search': '🔍',
+                'setting': '⚙',
+                'play': '▶',
+                'pause': '⏸',
+                'close': '✕',
+                'plus': '➕',
+                'add': '➕',
+                'minus': '➖',
+                'bold': 'B',
+                'italic': 'I',
+                'font': 'F',
+                'link': '🔗',
+                'image': '🖼',
+                'undo': '↶',
+                'redo': '↷',
+                'sync': '🔄',
+                'info': 'ⓘ',
+                'view': '👁',
+                'grid': '▦',
+                'document': '📄',
+                'return': '↩',
+                'update': '🔄',
+                'ringer': '🔔',
+                'share': '📤'
+            }
+            
+            # Create clean background with light colors - NEVER black
+            rect = QRect(2, 2, size-4, size-4)
+            
+            # Use very light, subtle colors for better UI integration
+            if name in ['brush', 'edit']:
+                # Creative tools - very light orange
+                bg_color = QColor(255, 245, 235, 120)  # Light warm
+                text_color = QColor(255, 140, 0)       # Orange text
+            elif name in ['delete']:
+                # Destructive action - very light red
+                bg_color = QColor(255, 240, 240, 120)  # Light red
+                text_color = QColor(220, 53, 69)       # Bootstrap red
+            elif name in ['checkbox', 'check']:
+                # Success action - very light green  
+                bg_color = QColor(240, 255, 240, 120)  # Light green
+                text_color = QColor(40, 167, 69)       # Bootstrap green
+            elif name in ['folder', 'document']:
+                # File operations - very light yellow
+                bg_color = QColor(255, 252, 230, 120)  # Light yellow
+                text_color = QColor(218, 165, 32)      # Goldenrod
+            elif name in ['search', 'history']:
+                # Navigation - very light blue
+                bg_color = QColor(240, 248, 255, 120)  # Light blue
+                text_color = QColor(0, 100, 200)       # Blue
+            else:
+                # Default - very light gray
+                bg_color = QColor(248, 249, 250, 120)  # Light gray
+                text_color = QColor(108, 117, 125)     # Bootstrap gray
+            
+            # Draw very subtle rounded background
+            painter.setBrush(QBrush(bg_color))
+            painter.setPen(QPen(text_color, 1))
+            painter.drawRoundedRect(rect, 4, 4)
+            
+            # Draw symbol with the same color as border for consistency
+            painter.setPen(QPen(text_color))
+            font = QFont()
+            
+            if name in unicode_symbols:
+                # Use Unicode symbol
+                symbol = unicode_symbols[name]
+                # All symbols use consistent size
+                font.setPointSize(11)
+                font.setBold(True)
+                painter.setFont(font)
+                painter.drawText(rect, _Qt.AlignmentFlag.AlignCenter, symbol)
+            else:
+                # Fallback to first letter
+                font.setPointSize(10)
+                font.setBold(True)
+                painter.setFont(font)
+                letter = name[0].upper() if name else '?'
+                painter.drawText(rect, _Qt.AlignmentFlag.AlignCenter, letter)
+            
+        finally:
+            painter.end()
+
+        icon = QIcon(pix)
+    except Exception:
+        icon = fallback if fallback else QIcon()
+
+    return icon
 
 class FluentIcon(metaclass=FluentIconMeta):
-    # Common icons used across the app (explicitly listed for clarity)
-    FOLDER = _icon('folder')
-    HISTORY = _icon('history')
-    GRID = _icon('grid')
-    BRUSH = _icon('brush')
+    # Icons will be populated by init_icons() after QApplication is ready
+    # Common icons used across the app
+    FOLDER = QIcon()
+    HISTORY = QIcon()
+    GRID = QIcon()
+    BRUSH = QIcon()
     SEARCH = QIcon()
     RINGER = QIcon()
     DOCUMENT = QIcon()
@@ -109,6 +245,44 @@ class FluentIcon(metaclass=FluentIconMeta):
     CHECK = QIcon()
     PLUS = QIcon()
     MINUS = QIcon()
+    ADD = QIcon()
+    DELETE = QIcon()
+    EDIT = QIcon()
+    VIEW = QIcon()
+    SYNC = QIcon()
+    ACCEPT_MEDIUM = QIcon()
+    INFO = QIcon()
+    SHARE = QIcon()
+
+
+def init_icons():
+    """Initialize all FluentIcon class attributes with proper icons.
+    
+    Must be called after QApplication is created. This function populates
+    all icon attributes with either real PNG files from resources/icons
+    or generated placeholder pixmaps if the files don't exist.
+    """
+    from PyQt6.QtGui import QGuiApplication
+    if QGuiApplication.instance() is None:
+        return  # Cannot initialize icons before QApplication exists
+    
+    # List of all icon names that should be initialized
+    icon_names = [
+        'FOLDER', 'HISTORY', 'GRID', 'BRUSH', 'SEARCH', 'RINGER',
+        'DOCUMENT', 'RETURN', 'UPDATE', 'SETTING', 'PLAY', 'PAUSE',
+        'CLOSE', 'FONT', 'BOLD', 'ITALIC', 'LINK', 'IMAGE', 'UNDO',
+        'REDO', 'CHECKBOX', 'CHECK', 'PLUS', 'MINUS', 'ADD', 'DELETE',
+        'EDIT', 'VIEW', 'SYNC', 'ACCEPT_MEDIUM', 'INFO', 'SHARE'
+    ]
+    
+    for name in icon_names:
+        try:
+            # Generate icon using _icon() function
+            icon = _icon(name.lower())
+            setattr(FluentIcon, name, icon)
+        except Exception:
+            # If generation fails, keep the empty QIcon
+            pass
 
 
 class PushButton(QPushButton):

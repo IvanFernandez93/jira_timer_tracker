@@ -1,0 +1,11 @@
+Icon Information for Fallback System
+=====================================
+
+brush: orange - 🖌
+checkbox: green - ☑
+edit: blue - ✏
+delete: red - 🗑
+folder: yellow - 📁
+history: purple - 🕒
+search: cyan - 🔍
+setting: gray - ⚙

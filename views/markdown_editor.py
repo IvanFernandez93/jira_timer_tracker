@@ -284,13 +284,27 @@ class MarkdownEditor(QWidget):
         
         if self.preview_mode == 0:  # Edit only
             self.stacked_widget.setCurrentIndex(0)
-            self.preview_btn.setToolTip("Switch to Edit+Preview Mode (Ctrl+P)")
+            # If toolbar exists, keep its tooltip/state in sync; otherwise just switch view
+            if hasattr(self, 'preview_btn'):
+                try:
+                    self.preview_btn.setToolTip("Switch to Edit+Preview Mode (Ctrl+P)")
+                except Exception:
+                    pass
         else:  # Edit + Preview side by side
             self.stacked_widget.setCurrentIndex(1)
             self._update_preview()
-            self.preview_btn.setToolTip("Switch to Edit Only Mode (Ctrl+P)")
-        
-        self.preview_btn.setChecked(self.preview_mode > 0)
+            if hasattr(self, 'preview_btn'):
+                try:
+                    self.preview_btn.setToolTip("Switch to Edit Only Mode (Ctrl+P)")
+                except Exception:
+                    pass
+
+        # Update checked state if preview_btn exists
+        if hasattr(self, 'preview_btn'):
+            try:
+                self.preview_btn.setChecked(self.preview_mode > 0)
+            except Exception:
+                pass
     
     def _update_preview(self):
         """Update the preview with rendered markdown."""

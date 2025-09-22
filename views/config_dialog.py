@@ -289,6 +289,27 @@ class ConfigDialog(QDialog):
         buttons_layout.addWidget(self.open_logs_folder_btn)
         
         layout.addLayout(buttons_layout)
+
+        # Add small indicators to show if the paths actually exist; disable open buttons if missing
+        from PyQt6.QtWidgets import QHBoxLayout, QLabel
+        self._db_exists_label = BodyLabel("")
+        self._logs_exists_label = BodyLabel("")
+        # Place indicators under the respective labels
+        indicator_layout = QHBoxLayout()
+        indicator_layout.addWidget(self._db_exists_label)
+        indicator_layout.addStretch()
+        layout.addLayout(indicator_layout)
+
+        indicator_layout2 = QHBoxLayout()
+        indicator_layout2.addWidget(self._logs_exists_label)
+        indicator_layout2.addStretch()
+        layout.addLayout(indicator_layout2)
+
+        # Update initial button states
+        try:
+            self._update_path_buttons(db_path, logs_path, app_data_path)
+        except Exception:
+            pass
         
         # Add info about data persistence
         info_text = BodyLabel("Nota: Questi percorsi sono gestiti automaticamente dal sistema operativo. "
@@ -494,4 +515,47 @@ class ConfigDialog(QDialog):
                 self.show_error(f"Impossibile aprire la cartella: {path}")
             except Exception:
                 # If show_error fails, there's nothing else to do safely here
+                pass
+
+    def _update_path_buttons(self, db_path: str, logs_path: str, app_data_path: str):
+        """Update the existence indicators and enable/disable open-folder buttons."""
+        import os
+
+        try:
+            # DB path may be a directory or a file path; check directory existence
+            db_dir = os.path.dirname(db_path) if os.path.isabs(db_path) else db_path
+            db_exists = os.path.exists(db_dir)
+            logs_exists = os.path.exists(logs_path)
+            app_data_exists = os.path.exists(app_data_path)
+
+            # Update labels
+            try:
+                self._db_exists_label.setText("Percorso trovato" if db_exists else "Non trovato")
+                self._db_exists_label.setStyleSheet("color: #28a745;" if db_exists else "color: #E74C3C;")
+            except Exception:
+                pass
+
+            try:
+                self._logs_exists_label.setText("Percorso trovato" if logs_exists else "Non trovato")
+                self._logs_exists_label.setStyleSheet("color: #28a745;" if logs_exists else "color: #E74C3C;")
+            except Exception:
+                pass
+
+            # Enable/disable buttons
+            try:
+                self.open_db_folder_btn.setEnabled(db_exists)
+            except Exception:
+                pass
+
+            try:
+                self.open_logs_folder_btn.setEnabled(logs_exists)
+            except Exception:
+                pass
+
+        except Exception:
+            # Defensive: if anything goes wrong just leave buttons enabled
+            try:
+                self.open_db_folder_btn.setEnabled(True)
+                self.open_logs_folder_btn.setEnabled(True)
+            except Exception:
                 pass

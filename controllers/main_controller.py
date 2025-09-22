@@ -2,6 +2,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThread, Qt, QTimer
 from PyQt6.QtWidgets import QTableWidgetItem, QPushButton, QApplication
 from qfluentwidgets import FluentIcon as FIF
 import logging
+import re
 
 logger = logging.getLogger('JiraTimeTracker')
 
@@ -46,6 +47,10 @@ class MainController(QObject):
         
         self._active_timer_key = None
         self._active_timer_seconds = 0
+        # Search tracking for server-side searches and retry logic
+        self._last_search_term = None
+        self._last_search_was_server = False
+        self._search_retry_done = False
 
         # Timer for updating the mini widget display
         self.widget_update_timer = QTimer(self)
@@ -123,7 +128,17 @@ class MainController(QObject):
         self.load_failed.connect(self._on_load_failed)
 
         # Connect grid-specific signals
+        # Keep instant client-side filtering while typing
         self.view.jira_grid_view.search_box.textChanged.connect(self._filter_grid)
+        # When the user presses Enter in the search box, perform a server-side search
+        try:
+            self.view.jira_grid_view.search_box.returnPressed.connect(self._on_search_requested)
+        except Exception:
+            try:
+                # Fallback for widgets that expose editingFinished instead
+                self.view.jira_grid_view.search_box.editingFinished.connect(self._on_search_requested)
+            except Exception:
+                pass
         self.view.jira_grid_view.table.verticalScrollBar().valueChanged.connect(self._on_scroll)
         self.view.jira_grid_view.table.doubleClicked.connect(self._open_detail_view)
         self.view.jira_grid_view.apply_jql_btn.clicked.connect(self._apply_custom_jql)
@@ -181,7 +196,7 @@ class MainController(QObject):
         # Initialize history view
         self.history_controller.load_history()
 
-    def load_jira_issues(self, append=False, favorite_keys: list[str] | None = None, custom_jql: str | None = None):
+    def load_jira_issues(self, append=False, favorite_keys: list[str] | None = None, custom_jql: str | None = None, send_jql: str | None = None):
         """
         Fetches Jira issues in a background thread.
         - append: If True, adds issues to the existing list.
@@ -203,11 +218,18 @@ class MainController(QObject):
         self.is_loading = True
         self.view.jira_grid_view.show_loading(True)
 
-        jql = custom_jql if custom_jql is not None else self.app_settings.get_setting(
+        # Determine the JQL shown in the input (the user's custom JQL) and the JQL actually
+        # sent to the server (send_jql). We must not overwrite the user's input field with the
+        # combined JQL used for the server-side search so that clearing the small filter box
+        # won't remove the original JQL text.
+        input_jql = custom_jql if custom_jql is not None else self.app_settings.get_setting(
             'last_used_jql',
             self.app_settings.get_setting('jql_query', 'assignee = currentUser() AND status != "Done"'),
         )
-        self.view.jira_grid_view.set_jql_text(jql) # Update the input field
+        self.view.jira_grid_view.set_jql_text(input_jql) # Update the input field
+
+        # The actual JQL to send to Jira (may be a combined version including filters)
+        jql = send_jql if send_jql is not None else input_jql
 
         # Create a dedicated thread for this load operation and keep references
         thread = QThread()
@@ -296,9 +318,20 @@ class MainController(QObject):
             self._logger.error("Jira data load failed: %s", error_message)
         except Exception:
             pass
-
-        # Show error in UI
-        self.view.jira_grid_view.show_error(error_message)
+        # Show error in UI (defensively - some InfoBar implementations may not expose the same API)
+        try:
+            self.view.jira_grid_view.show_error(error_message)
+        except Exception:
+            try:
+                # Fallback: use a simple message box so the user still sees the error
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.critical(self.view, "Errore", str(error_message))
+            except Exception:
+                # As a last resort, update the loading overlay if present
+                try:
+                    self.view.jira_grid_view.loading_overlay.setVisible(False)
+                except Exception:
+                    pass
 
     def _add_issue_to_grid(self, issue_data: dict, local_times: dict):
         """Adds a single issue to the grid view's table."""
@@ -439,6 +472,76 @@ class MainController(QObject):
             else:
                 table.setRowHidden(row, True)
 
+    def _append_search_filter_to_jql(self, jql: str | None, search_text: str) -> str:
+        """
+        Append a search filter to a JQL query using Jira's contains operator (~).
+        The search is appended as: AND (summary ~ "text" OR description ~ "text" OR comment ~ "text")
+        Preserves an existing ORDER BY clause by inserting the filter before it.
+        If no base JQL is provided, returns only the filter clause so the loader can use it.
+        """
+        if not search_text:
+            return jql or ""
+
+        s = search_text.strip()
+        if not s:
+            return jql or ""
+
+        # Allow users to use SQL-style '%' as a wildcard in the search box by mapping
+        # '%' -> '*' (Lucene wildcard) before escaping. Jira's text search (~) understands
+        # Lucene syntax and uses '*' as a wildcard; '%' is not recognized by JQL.
+        # Note: leading wildcards can be expensive on server-side searches.
+        try:
+            s = s.replace('%', '*')
+        except Exception:
+            pass
+
+        # Basic escaping for quotes and backslashes
+        escaped = s.replace('\\', '\\\\').replace('"', '\\"')
+
+        # Determine if the search term looks like an issue key (e.g. PROJ-123)
+        key_like = False
+        try:
+            # Accept formats like ABC-123, or project.key-123 (conservative)
+            if re.match(r'^[A-Za-z0-9._]+-\d+$', s):
+                key_like = True
+        except Exception:
+            key_like = False
+
+        if key_like:
+            # When the user typed an apparent issue key, use exact match for key (operator '='),
+            # because Jira does not allow '~' on the key field on some instances.
+            clause = (
+                f'(key = "{escaped}" OR summary ~ "{escaped}" '
+                f'OR description ~ "{escaped}" OR comment ~ "{escaped}")'
+            )
+        else:
+            # Do not use '~' on key to avoid server-side errors; search in textual fields only
+            # If the user didn't include any wildcard, wrap the term with '*' so it matches
+            # substrings (SQL-style behavior). Preserve explicit wildcards if provided.
+            try:
+                if '*' not in s:
+                    escaped = f'*{escaped}*'
+            except Exception:
+                pass
+
+            clause = (
+                f'(summary ~ "{escaped}" OR description ~ "{escaped}" OR comment ~ "{escaped}")'
+            )
+
+        base = (jql or "").strip()
+        if not base:
+            return clause
+
+        # Preserve ORDER BY if present
+        m = re.search(r"\bORDER\s+BY\b", base, flags=re.IGNORECASE)
+        if m:
+            idx = m.start()
+            before = base[:idx].strip()
+            order = base[idx:].strip()
+            return f"{before} AND {clause} {order}"
+
+        return f"{base} AND {clause}"
+
     def _apply_custom_jql(self):
         """Applies the custom JQL from the input field."""
         custom_jql = self.view.jira_grid_view.get_jql_text()
@@ -454,8 +557,40 @@ class MainController(QObject):
             # Add JQL to history
             self.db_service.add_jql_history(custom_jql)
             
-            # Load issues with the custom JQL
-            self.load_jira_issues(append=False, custom_jql=custom_jql)
+            # Combine the custom JQL with the current search/filter box using a LIKE (~)
+            search_filter = self.view.jira_grid_view.search_box.text()
+            combined_jql = self._append_search_filter_to_jql(custom_jql, search_filter)
+
+            # Load issues with the combined JQL (do not overwrite saved/custom jql history)
+            self.load_jira_issues(append=False, custom_jql=custom_jql, send_jql=combined_jql)
+
+    def _on_search_requested(self):
+        """Trigger a server-side search using the current JQL and the search box text.
+
+        This is invoked when the user presses Enter in the search box. It will combine the
+        active JQL (from the JQL input or last-used JQL) with the search text and reload
+        issues from Jira so the search is performed server-side rather than only filtering
+        the existing in-memory table.
+        """
+        try:
+            search_text = self.view.jira_grid_view.search_box.text().strip()
+        except Exception:
+            search_text = ""
+
+        # Determine base JQL (prefer what the user has in the JQL input, fall back to last used)
+        base_jql = self.view.jira_grid_view.get_jql_text() or self.app_settings.get_setting(
+            'last_used_jql',
+            self.app_settings.get_setting('jql_query', 'assignee = currentUser() AND status != "Done"'),
+        )
+
+        # If favorites filter is active, disable it because we're performing a broader search
+        if self.view.jira_grid_view.favorites_btn.isChecked():
+            self.view.jira_grid_view.favorites_btn.setChecked(False)
+            self._on_favorites_toggled(False)
+
+        # Build combined JQL and reload issues from server (don't overwrite the input field)
+        combined = self._append_search_filter_to_jql(base_jql, search_text)
+        self.load_jira_issues(append=False, custom_jql=base_jql, send_jql=combined)
             
     def _show_jql_history_dialog(self):
         """Shows the JQL history dialog."""

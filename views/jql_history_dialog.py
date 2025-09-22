@@ -91,7 +91,7 @@ class JqlHistoryDialog(QDialog):
         self.use_history_btn = PushButton("Usa Questa Query")
         self.use_history_btn.setIcon(FIF.CHECKBOX)
         self.add_to_favorites_btn = PushButton("Salva nei Preferiti")
-        self.add_to_favorites_btn.setIcon(FIF.SAVE)
+        self.add_to_favorites_btn.setIcon(FIF.BRUSH)  # Changed icon to a more appropriate one
         
         buttons_layout.addWidget(self.use_history_btn)
         buttons_layout.addWidget(self.add_to_favorites_btn)
@@ -188,15 +188,22 @@ class JqlHistoryDialog(QDialog):
             
     def show_info(self, title, message):
         """Shows an info message using InfoBar."""
-        InfoBar.success(
-            title=title,
-            content=message,
-            orient=Qt.Orientation.Horizontal,
-            isClosable=True,
-            position=InfoBarPosition.TOP,
-            duration=3000,
-            parent=self
-        )
+        try:
+            InfoBar.success(
+                title=title,
+                content=message,
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self
+            )
+        except Exception:
+            try:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.information(self, title, str(message))
+            except Exception:
+                pass
 
     def showEvent(self, event):
         try:
@@ -209,12 +216,19 @@ class JqlHistoryDialog(QDialog):
         
     def show_error(self, title, message):
         """Shows an error message using InfoBar."""
-        InfoBar.error(
-            title=title,
-            content=message,
-            orient=Qt.Orientation.Horizontal,
-            isClosable=True,
-            position=InfoBarPosition.TOP,
-            duration=3000,
-            parent=self
-        )
+        try:
+            InfoBar.error(
+                title=title,
+                content=message,
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self
+            )
+        except Exception:
+            try:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.critical(self, title, str(message))
+            except Exception:
+                pass

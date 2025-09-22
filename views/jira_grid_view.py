@@ -183,16 +183,28 @@ class JiraGridView(QWidget):
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(3000, lambda: self.loading_overlay.setVisible(False))
         
-        # Always show the error in the InfoBar
-        InfoBar.error(
-            title="Errore",
-            content=message,
-            orient=Qt.Orientation.Horizontal,
-            isClosable=True,
-            position=InfoBarPosition.TOP,
-            duration=3000,  # 3 seconds
-            parent=self
-        )
+        # Always attempt to show the error in the InfoBar; fallback to QMessageBox or overlay
+        try:
+            InfoBar.error(
+                title="Errore",
+                content=message,
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,  # 3 seconds
+                parent=self
+            )
+        except Exception:
+            try:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.critical(self, "Errore", str(message))
+            except Exception:
+                # Last fallback: show in the overlay label if available
+                try:
+                    self.error_label.setText(message)
+                    self.error_label.setVisible(True)
+                except Exception:
+                    pass
 
     def clear_table(self):
         """Removes all rows from the table."""
