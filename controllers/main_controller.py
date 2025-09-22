@@ -908,6 +908,20 @@ class MainController(QObject):
         except Exception:
             pass
 
+        # Debug: dump active threads status to help diagnose "Destroyed while thread is still running"
+        try:
+            for t in list(self._active_threads):
+                try:
+                    self._logger.debug("Active thread at shutdown: name=%s running=%s isFinished=%s", 
+                                       getattr(t, 'objectName', lambda: None)(), getattr(t, 'isRunning', lambda: False)(), getattr(t, 'isFinished', lambda: False)())
+                except Exception:
+                    try:
+                        self._logger.debug("Active thread at shutdown: %s (could not query state)", str(t))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         # Gracefully stop any active threads started by this controller
         try:
             # First, attempt to stop worker objects if they expose a stop/terminate API

@@ -180,16 +180,15 @@ class JiraDetailView(QWidget):
 
         # Formatting tool button factory
         def make_toolbutton(text, tooltip, callback, width=36):
+            # Do not auto-connect callbacks here. The controller will wire
+            # toolbar buttons to the active editor so connections are
+            # consistent (and will be re-wired on tab changes).
             b = QToolButton()
             b.setText(text)
             b.setToolTip(tooltip)
             b.setFixedSize(width, 28)
             b.setAutoRaise(True)
             b.setStyleSheet('font-weight:600; border:1px solid #e6e6e6; background:#fafafa;')
-            try:
-                b.clicked.connect(callback)
-            except Exception:
-                pass
             return b
         # Expose toolbar buttons on self so controllers can bind actions
         self.bold_btn = make_toolbutton('B', 'Grassetto (Ctrl+B)', lambda: self._wrap_selection('**','**'))
@@ -236,7 +235,8 @@ class JiraDetailView(QWidget):
         self.add_note_btn = QPushButton("+ New Note")
         self.add_note_btn.setToolTip("Crea una nuova nota personale")
         self.add_note_btn.setStyleSheet("font-size: 14px; padding: 6px 10px;")
-        self.add_note_btn.clicked.connect(lambda: self._add_note())
+        # The controller will handle creating new notes; do not create a
+        # view-local note here to avoid duplicate tabs and mismatched editors.
 
         annotations_layout.addWidget(self.add_note_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
@@ -366,17 +366,8 @@ class JiraDetailView(QWidget):
         except Exception:
             pass
 
-        try:
-            self.number_btn.clicked.connect(_numbered_list)
-            self.link_btn.clicked.connect(_insert_link)
-            self.preview_btn.clicked.connect(_toggle_preview)
-        except Exception:
-            pass
-        # create an initial empty note
-        try:
-            self._add_note()
-        except Exception:
-            pass
+        # Controller will connect the functional callbacks for these
+        # buttons. The view only exposes the UI elements.
 
         # Tab 5: Local Time History
         self.time_history_tab = QWidget()

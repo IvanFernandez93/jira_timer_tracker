@@ -10,6 +10,9 @@ import markdown
 
 from services.jira_service import JiraService
 from views.markdown_editor import MarkdownEditor
+import logging
+
+_logger = logging.getLogger('JiraTimeTracker')
 
 class AttachmentDownloadWorker(QThread):
     """Worker thread for downloading attachments asynchronously."""
@@ -563,15 +566,33 @@ class JiraDetailController(QObject):
             self._active_note_editor = None
             return
 
-        current_editor = self.view.notes_tab_widget.widget(index)
-        if isinstance(current_editor, (QTextEdit, MarkdownEditor)):
-            self._active_note_editor = current_editor
+        current_widget = self.view.notes_tab_widget.widget(index)
+        # Some tabs may be a plain editor widget (MarkdownEditor or QTextEdit)
+        # or may be a container widget (from the view) exposing an `editor` attribute.
+        editor_ref = None
+        if isinstance(current_widget, (QTextEdit, MarkdownEditor)):
+            editor_ref = current_widget
+        elif hasattr(current_widget, 'editor'):
+            # view-created container with .editor (QTextEdit inside)
+            editor_ref = getattr(current_widget, 'editor', None)
+
+        if editor_ref is not None:
+            self._active_note_editor = editor_ref
             
             # Update the current note title
             self._current_note_title = self.view.notes_tab_widget.tabText(index)
 
             # Only load content from DB if the editor is empty (i.e., just created)
-            if self._active_note_editor.toPlainText().strip() == "":
+            try:
+                empty_text = self._active_note_editor.toPlainText().strip()
+            except Exception:
+                # Fallback for editors exposing toMarkdown()
+                try:
+                    empty_text = self._active_note_editor.toMarkdown().strip()
+                except Exception:
+                    empty_text = ""
+
+            if empty_text == "":
                 annotations = self.db_service.get_annotations(self.jira_key)
                 for ann_title, ann_content in annotations:
                     if ann_title == self._current_note_title:
@@ -582,8 +603,14 @@ class JiraDetailController(QObject):
 
             # Connect the textChanged signal to the new editor's timer and immediate save
             if hasattr(self, 'autosave_timer'):
-                self._active_note_editor.textChanged.connect(self.autosave_timer.start)
-                self._active_note_editor.textChanged.connect(self._save_current_note)
+                try:
+                    self._active_note_editor.textChanged.connect(self.autosave_timer.start)
+                except Exception:
+                    pass
+                try:
+                    self._active_note_editor.textChanged.connect(self._save_current_note)
+                except Exception:
+                    pass
 
             # Wire the top toolbar buttons to the new active editor
             try:
@@ -599,53 +626,174 @@ class JiraDetailController(QObject):
         """
         view = self.view
 
-        # Helper wrappers that operate on the editor safely
-        def wrap_selection(prefix, suffix=None):
+        # Helper wrappers that operate on the editor safely. Use the inner QTextEdit
+        # when available for direct cursor editing which is robust across both
+        # MarkdownEditor instances and view-created container widgets.
+        def _get_text_edit_target():
+            # Return a QTextEdit instance we can operate on directly, or None
             try:
+                # If editor is a MarkdownEditor instance with an internal `editor` QTextEdit
+                if hasattr(editor, 'editor') and editor.editor is not None:
+                    return editor.editor
+                # If editor itself is a QTextEdit
+                from PyQt6.QtWidgets import QTextEdit
+                if isinstance(editor, QTextEdit):
+                    return editor
+                # If it's a view container exposing .editor attribute
+                if hasattr(editor, 'editor'):
+                    return getattr(editor, 'editor')
+            except Exception:
+                pass
+            return None
+
+        def wrap_selection(prefix, suffix=None):
+            te = _get_text_edit_target()
+            try:
+                # Prefer editor-level API when present (MarkdownEditor)
                 if hasattr(editor, 'wrap_selection'):
-                    # MarkdownEditor API
                     if suffix is None:
                         editor.wrap_selection(prefix)
                     else:
                         editor.wrap_selection(prefix, suffix)
-                elif hasattr(editor, 'toggle_bold') and prefix == '**':
-                    editor.toggle_bold()
-                else:
-                    # Fallback for QTextEdit: insert markers around selection
-                    tc = editor.textCursor()
+                    return
+
+                # Directly operate on QTextEdit as fallback
+                if te is not None:
+                    tc = te.textCursor()
+                    if suffix is None:
+                        suffix = prefix
                     if tc.hasSelection():
                         sel = tc.selectedText()
-                        suffix = suffix if suffix is not None else prefix
                         tc.insertText(f"{prefix}{sel}{suffix}")
                     else:
-                        suffix = suffix if suffix is not None else prefix
+                        # Insert prefix+suffix and move cursor between them
+                        start_pos = tc.position()
                         tc.insertText(f"{prefix}{suffix}")
+                        # Move cursor back to between prefix and suffix
+                        for _ in range(len(suffix)):
+                            tc.movePosition(tc.MoveOperation.Left)
+                        te.setTextCursor(tc)
+                    te.setFocus()
+                    return
             except Exception:
-                pass
+                _logger.exception("Error in wrap_selection wrapper")
+
+            # Last-resort: call view-level helper
+            try:
+                if hasattr(self.view, '_wrap_selection'):
+                    if suffix is None:
+                        self.view._wrap_selection(prefix, prefix)
+                    else:
+                        self.view._wrap_selection(prefix, suffix)
+            except Exception:
+                _logger.exception("Error calling view._wrap_selection fallback")
 
         def insert_bullet():
+            te = _get_text_edit_target()
             try:
                 if hasattr(editor, 'insert_bullet_list'):
                     editor.insert_bullet_list()
-                else:
-                    tc = editor.textCursor()
+                    return
+                if te is not None:
+                    tc = te.textCursor()
                     tc.movePosition(tc.MoveOperation.StartOfLine)
                     tc.insertText('- ')
-                    editor.setTextCursor(tc)
+                    te.setTextCursor(tc)
+                    te.setFocus()
+                    return
             except Exception:
-                pass
+                _logger.exception("Error in insert_bullet wrapper")
+
+            try:
+                if hasattr(self.view, '_bullet_list'):
+                    self.view._bullet_list()
+            except Exception:
+                _logger.exception("Error calling view._bullet_list fallback")
+
+        def insert_numbered():
+            te = _get_text_edit_target()
+            try:
+                if hasattr(editor, 'insert_numbered_list'):
+                    editor.insert_numbered_list()
+                    return
+                if te is not None:
+                    tc = te.textCursor()
+                    tc.movePosition(tc.MoveOperation.StartOfLine)
+                    tc.insertText('1. ')
+                    te.setTextCursor(tc)
+                    te.setFocus()
+                    return
+            except Exception:
+                _logger.exception("Error in insert_numbered wrapper")
+
+            try:
+                if hasattr(self.view, '_numbered_list'):
+                    self.view._numbered_list()
+            except Exception:
+                _logger.exception("Error calling view._numbered_list fallback")
+
+        def insert_link():
+            te = _get_text_edit_target()
+            try:
+                if hasattr(editor, 'insert_link'):
+                    editor.insert_link()
+                    return
+                if te is not None:
+                    tc = te.textCursor()
+                    if tc.hasSelection():
+                        text = tc.selectedText()
+                    else:
+                        text = 'Link Text'
+                    tc.insertText(f'[{text}](URL)')
+                    te.setTextCursor(tc)
+                    te.setFocus()
+                    return
+            except Exception:
+                _logger.exception("Error in insert_link wrapper")
+
+            try:
+                if hasattr(self.view, '_insert_link'):
+                    self.view._insert_link()
+            except Exception:
+                _logger.exception("Error calling view._insert_link fallback")
+
+        def toggle_preview():
+            try:
+                # Prefer editor-level preview toggle if available
+                if hasattr(editor, 'toggle_preview'):
+                    editor.toggle_preview()
+                    return
+            except Exception:
+                _logger.exception("Error calling editor.toggle_preview")
+
+            try:
+                if hasattr(self.view, '_toggle_preview'):
+                    self.view._toggle_preview()
+            except Exception:
+                _logger.exception("Error calling view._toggle_preview fallback")
 
         def prefix_line(prefix):
+            te = _get_text_edit_target()
             try:
                 if hasattr(editor, 'insert_header'):
                     # MarkdownEditor has insert_header(level) - map prefix
                     level = prefix.count('#')
                     editor.insert_header(level)
-                else:
-                    tc = editor.textCursor()
+                    return
+                if te is not None:
+                    tc = te.textCursor()
                     tc.movePosition(tc.MoveOperation.StartOfLine)
                     tc.insertText(prefix)
-                    editor.setTextCursor(tc)
+                    te.setTextCursor(tc)
+                    te.setFocus()
+                    return
+            except Exception:
+                _logger.exception("Error in prefix_line wrapper")
+
+            try:
+                # Last-resort: call view helper
+                if hasattr(self.view, '_prefix_line'):
+                    self.view._prefix_line(prefix)
             except Exception:
                 pass
 
@@ -672,15 +820,52 @@ class JiraDetailController(QObject):
             view.h3_btn.clicked.disconnect()
         except Exception:
             pass
+        try:
+            view.underline_btn.clicked.disconnect()
+        except Exception:
+            pass
+        try:
+            view.number_btn.clicked.disconnect()
+        except Exception:
+            pass
+        try:
+            view.link_btn.clicked.disconnect()
+        except Exception:
+            pass
+        try:
+            view.preview_btn.clicked.disconnect()
+        except Exception:
+            pass
 
         # Reconnect to the wrappers
-        view.bold_btn.clicked.connect(lambda: wrap_selection('**'))
-        view.italic_btn.clicked.connect(lambda: wrap_selection('*'))
-        view.code_btn.clicked.connect(lambda: wrap_selection('`'))
-        view.bullet_btn.clicked.connect(lambda: insert_bullet())
-        view.h1_btn.clicked.connect(lambda: prefix_line('# '))
-        view.h2_btn.clicked.connect(lambda: prefix_line('## '))
-        view.h3_btn.clicked.connect(lambda: prefix_line('### '))
+        def _log_and_call(name, fn):
+            def _inner():
+                try:
+                    tab = None
+                    try:
+                        tab = view.notes_tab_widget.tabText(view.notes_tab_widget.currentIndex())
+                    except Exception:
+                        tab = None
+                    _logger.debug(f"Toolbar click: {name} on tab={tab} editor={type(editor).__name__}")
+                except Exception:
+                    pass
+                try:
+                    return fn()
+                except Exception:
+                    return None
+            return _inner
+
+        view.bold_btn.clicked.connect(_log_and_call('bold', lambda: wrap_selection('**')))
+        view.italic_btn.clicked.connect(_log_and_call('italic', lambda: wrap_selection('*')))
+        view.code_btn.clicked.connect(_log_and_call('code', lambda: wrap_selection('`')))
+        view.bullet_btn.clicked.connect(_log_and_call('bullet', lambda: insert_bullet()))
+        view.h1_btn.clicked.connect(_log_and_call('h1', lambda: prefix_line('# ')))
+        view.h2_btn.clicked.connect(_log_and_call('h2', lambda: prefix_line('## ')))
+        view.h3_btn.clicked.connect(_log_and_call('h3', lambda: prefix_line('### ')))
+        view.underline_btn.clicked.connect(_log_and_call('underline', lambda: wrap_selection('~~')))
+        view.number_btn.clicked.connect(_log_and_call('number', lambda: insert_numbered()))
+        view.link_btn.clicked.connect(_log_and_call('link', lambda: insert_link()))
+        view.preview_btn.clicked.connect(_log_and_call('preview', lambda: toggle_preview()))
 
         # Emoji picker binds to _insert_emoji which already uses notes_tab_widget to find the active editor
         try:
@@ -694,10 +879,27 @@ class JiraDetailController(QObject):
         self._save_current_note() # Ensure last active note is saved
         
         # Cancel all ongoing downloads
+        # Debug: log worker states before cancelling
+        try:
+            for w in list(self._download_workers):
+                try:
+                    _logger.debug("Download worker state before cancel: worker=%s running=%s", type(w).__name__, getattr(w, 'isRunning', lambda: False)())
+                except Exception:
+                    _logger.debug("Download worker state before cancel: %s", str(w))
+        except Exception:
+            pass
         for worker in self._download_workers:
             worker.cancel()
         
         # Cancel all thumbnail downloads
+        try:
+            for w in list(self._thumbnail_workers):
+                try:
+                    _logger.debug("Thumbnail worker state before cancel: worker=%s running=%s", type(w).__name__, getattr(w, 'isRunning', lambda: False)())
+                except Exception:
+                    _logger.debug("Thumbnail worker state before cancel: %s", str(w))
+        except Exception:
+            pass
         for worker in self._thumbnail_workers:
             worker.cancel()
         
