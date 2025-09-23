@@ -123,8 +123,12 @@ class JiraService:
         
         def _do_get():
             # Fetch all available fields, plus comments and attachments
-            issue = self.jira.issue(issue_key, expand="renderedFields")
+            issue = self.jira.issue(issue_key, expand="renderedFields,issuelinks")
+            if issue is None:
+                raise JIRAError(f"Issue {issue_key} not found or not accessible")
             issue_data = issue.raw
+            if issue_data is None or not isinstance(issue_data, dict):
+                raise JIRAError(f"Invalid response data for issue {issue_key}")
             # Also fetch comments separately
             issue_data['comments'] = self.jira.comments(issue_key)
             return issue_data

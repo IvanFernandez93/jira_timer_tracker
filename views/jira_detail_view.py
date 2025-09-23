@@ -34,9 +34,9 @@ class EmojiPickerDialog(QDialog):
         self.accept()
 
 
-class JiraDetailView(QWidget):
+class JiraDetailView(QDialog):
     """
-    A window to display the full details of a single Jira issue.
+    A dialog to display the full details of a single Jira issue.
     Fulfills requirement 2.4.
     """
     def __init__(self, jira_key, parent=None):
@@ -44,6 +44,7 @@ class JiraDetailView(QWidget):
         self.jira_key = jira_key
         self.setWindowTitle(f"Detail - {jira_key}")
         self.setGeometry(150, 150, 900, 700)
+        self.setModal(False)  # Allow multiple detail dialogs to be open
 
         # If parent has 'always on top', inherit that flag so this window also stays on top
         try:
@@ -396,6 +397,25 @@ class JiraDetailView(QWidget):
         
         self.tab_widget.addTab(self.time_history_tab, "Time History")
 
+        # Tab 6: Linked Issues
+        self.issue_links_tab = QWidget()
+        issue_links_layout = QVBoxLayout(self.issue_links_tab)
+        
+        # Create tree widget for hierarchical display of linked issues
+        from PyQt6.QtWidgets import QTreeWidget, QTreeWidgetItem, QHeaderView
+        self.issue_links_tree = QTreeWidget()
+        self.issue_links_tree.setHeaderLabels(["Issue", "Summary", "Status", "Type"])
+        self.issue_links_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.issue_links_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.issue_links_tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.issue_links_tree.header().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.issue_links_tree.setAlternatingRowColors(True)
+        self.issue_links_tree.itemDoubleClicked.connect(self._on_tree_item_double_clicked)
+        
+        issue_links_layout.addWidget(self.issue_links_tree)
+        
+        self.tab_widget.addTab(self.issue_links_tab, "Linked Issues")
+
         self.tab_widget.setCurrentIndex(0) # Default to Details tab
 
     def create_attachment_widget(self, filename, size_kb, attachment_data):
@@ -524,3 +544,78 @@ class JiraDetailView(QWidget):
                 tc.insertText(prefix)
                 ed.setTextCursor(tc)
             ed.setFocus()
+
+    def create_tree_item(self, key, summary, status, item_type, link_type=""):
+        """Create a QTreeWidgetItem for the links tree with appropriate styling."""
+        from PyQt6.QtWidgets import QTreeWidgetItem
+        from PyQt6.QtGui import QColor, QBrush
+        
+        item = QTreeWidgetItem()
+        item.setText(0, key)
+        item.setText(1, summary)
+        item.setText(2, status)
+        item.setText(3, link_type if link_type else item_type)
+        
+        # Store the issue key for later use
+        item.setData(0, Qt.ItemDataRole.UserRole, key)
+        
+        # Style based on item type
+        if item_type == "current":
+            # Current issue - bold and blue
+            font = item.font(0)
+            font.setBold(True)
+            for col in range(4):
+                item.setFont(col, font)
+            item.setBackground(0, QBrush(QColor(240, 248, 255)))  # Light blue
+            item.setBackground(1, QBrush(QColor(240, 248, 255)))
+            item.setBackground(2, QBrush(QColor(240, 248, 255)))
+            item.setBackground(3, QBrush(QColor(240, 248, 255)))
+        elif item_type == "loading":
+            # Loading indicator
+            item.setText(1, "")
+            item.setText(2, "")
+            item.setText(3, "")
+            item.setBackground(0, QBrush(QColor(255, 255, 224)))  # Light yellow
+        elif item_type == "error":
+            # Error message
+            item.setText(1, "")
+            item.setText(2, "")
+            item.setText(3, "")
+            item.setBackground(0, QBrush(QColor(255, 224, 224)))  # Light red
+        elif item_type == "info":
+            # Info message
+            item.setText(1, "")
+            item.setText(2, "")
+            item.setText(3, "")
+            item.setBackground(0, QBrush(QColor(240, 240, 240)))  # Light gray
+        elif item_type in ["outward", "inward"]:
+            # Linked issues
+            if status.lower() in ["done", "closed", "risolto"]:
+                item.setBackground(2, QBrush(QColor(224, 255, 224)))  # Light green
+            elif status.lower() in ["aperto", "open", "to do"]:
+                item.setBackground(2, QBrush(QColor(255, 240, 224)))  # Light orange
+            elif status.lower() in ["in progress", "in corso"]:
+                item.setBackground(2, QBrush(QColor(255, 255, 224)))  # Light yellow
+        
+        return item
+
+    def _on_tree_item_double_clicked(self, item, column):
+        """Handle double-click on tree items to open linked issues."""
+        issue_key = item.data(0, Qt.ItemDataRole.UserRole)
+        if issue_key and issue_key not in ["Caricamento collegamenti...", "Nessun collegamento trovato"] and not issue_key.startswith("Errore:"):
+            # Import here to avoid circular imports
+            from views.jira_detail_view import JiraDetailView
+            from controllers.jira_detail_controller import JiraDetailController
+            
+            # Get controller's services (assuming we have access to controller)
+            if hasattr(self, 'controller'):
+                detail_dialog = JiraDetailView(issue_key, parent=self)
+                detail_controller = JiraDetailController(
+                    detail_dialog,
+                    self.controller.jira_service,
+                    self.controller.db_service,
+                    issue_key
+                )
+                detail_dialog.controller = detail_controller
+                detail_controller._load_data()
+                detail_dialog.exec()  # Show as modal dialog

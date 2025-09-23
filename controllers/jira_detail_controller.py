@@ -145,6 +145,191 @@ class ThumbnailDownloadWorker(QThread):
             self.thumbnail_error.emit(self.attachment_widget, str(e))
 
 
+class IssueLinksLoaderWorker(QThread):
+    """Worker thread for loading issue links asynchronously."""
+    
+    links_loaded = pyqtSignal(list)  # List of link dictionaries
+    links_error = pyqtSignal(str)    # Error message
+    
+    def __init__(self, jira_service, issue_key):
+        super().__init__()
+        self.jira_service = jira_service
+        self.issue_key = issue_key
+        self.is_cancelled = False
+    
+    def cancel(self):
+        """Cancel the links loading."""
+        self.is_cancelled = True
+    
+    def run(self):
+        """Load issue links and build the links tree."""
+        try:
+            if self.is_cancelled:
+                return
+            
+            # Get the issue data with expanded issuelinks
+            issue_data = self.jira_service.get_issue(self.issue_key)
+            
+            if self.is_cancelled:
+                return
+            
+            if not issue_data:
+                self.links_error.emit("Impossibile caricare i dati dell'issue")
+                return
+            
+            # Extract issue links
+            links = issue_data.get('fields', {}).get('issuelinks', [])
+            
+            # Build the links tree structure
+            links_tree = self._build_links_tree(links, issue_data)
+            
+            if not self.is_cancelled:
+                self.links_loaded.emit(links_tree)
+            
+        except Exception as e:
+            if not self.is_cancelled:
+                self.links_error.emit(str(e))
+    
+    def _build_links_tree(self, links, current_issue_data):
+        """Build a hierarchical tree structure of issue links."""
+        tree_data = []
+        
+        # Add current issue as root
+        current_key = current_issue_data.get('key', 'Unknown')
+        current_summary = current_issue_data.get('fields', {}).get('summary', 'No summary')
+        current_status = current_issue_data.get('fields', {}).get('status', {}).get('name', 'Unknown')
+        
+        root_item = {
+            'key': current_key,
+            'summary': current_summary,
+            'status': current_status,
+            'type': 'current',
+            'children': []
+        }
+        
+        # Process each link
+        for link in links:
+            if self.is_cancelled:
+                return []
+                
+            link_type = link.get('type', {}).get('name', 'Link')
+            outward_issue = link.get('outwardIssue')
+            inward_issue = link.get('inwardIssue')
+            
+            if outward_issue:
+                # This issue links TO another issue
+                linked_key = outward_issue.get('key', 'Unknown')
+                linked_summary = outward_issue.get('fields', {}).get('summary', 'No summary')
+                linked_status = outward_issue.get('fields', {}).get('status', {}).get('name', 'Unknown')
+                
+                link_item = {
+                    'key': linked_key,
+                    'summary': linked_summary,
+                    'status': linked_status,
+                    'link_type': link_type,
+                    'direction': 'outward',
+                    'children': []
+                }
+                
+                # Try to load children links for this linked issue
+                try:
+                    if not self.is_cancelled:
+                        child_links = self._load_child_links(linked_key)
+                        link_item['children'] = child_links
+                except Exception:
+                    # If we can't load children, just continue without them
+                    pass
+                
+                root_item['children'].append(link_item)
+                
+            elif inward_issue:
+                # Another issue links TO this issue
+                linked_key = inward_issue.get('key', 'Unknown')
+                linked_summary = inward_issue.get('fields', {}).get('summary', 'No summary')
+                linked_status = inward_issue.get('fields', {}).get('status', {}).get('name', 'Unknown')
+                
+                link_item = {
+                    'key': linked_key,
+                    'summary': linked_summary,
+                    'status': linked_status,
+                    'link_type': link_type,
+                    'direction': 'inward',
+                    'children': []
+                }
+                
+                # Try to load children links for this linked issue
+                try:
+                    if not self.is_cancelled:
+                        child_links = self._load_child_links(linked_key)
+                        link_item['children'] = child_links
+                except Exception:
+                    # If we can't load children, just continue without them
+                    pass
+                
+                root_item['children'].append(link_item)
+        
+        tree_data.append(root_item)
+        return tree_data
+    
+    def _load_child_links(self, issue_key):
+        """Load links for a child issue (limited depth to avoid infinite recursion)."""
+        try:
+            if self.is_cancelled:
+                return []
+                
+            # Get issue data for the child
+            child_issue_data = self.jira_service.get_issue(issue_key)
+            
+            if not child_issue_data or self.is_cancelled:
+                return []
+            
+            # Get only direct links (no recursion to avoid performance issues)
+            child_links = child_issue_data.get('fields', {}).get('issuelinks', [])
+            
+            children = []
+            for link in child_links[:3]:  # Limit to 3 children per issue for performance
+                if self.is_cancelled:
+                    return []
+                    
+                link_type = link.get('type', {}).get('name', 'Link')
+                outward_issue = link.get('outwardIssue')
+                inward_issue = link.get('inwardIssue')
+                
+                if outward_issue and outward_issue.get('key') != self.issue_key:
+                    child_key = outward_issue.get('key', 'Unknown')
+                    child_summary = outward_issue.get('fields', {}).get('summary', 'No summary')
+                    child_status = outward_issue.get('fields', {}).get('status', {}).get('name', 'Unknown')
+                    
+                    children.append({
+                        'key': child_key,
+                        'summary': child_summary,
+                        'status': child_status,
+                        'link_type': link_type,
+                        'direction': 'child',
+                        'children': []  # No further recursion
+                    })
+                    
+                elif inward_issue and inward_issue.get('key') != self.issue_key:
+                    child_key = inward_issue.get('key', 'Unknown')
+                    child_summary = inward_issue.get('fields', {}).get('summary', 'No summary')
+                    child_status = inward_issue.get('fields', {}).get('status', {}).get('name', 'Unknown')
+                    
+                    children.append({
+                        'key': child_key,
+                        'summary': child_summary,
+                        'status': child_status,
+                        'link_type': link_type,
+                        'direction': 'child',
+                        'children': []  # No further recursion
+                    })
+            
+            return children
+            
+        except Exception:
+            # Return empty list on any error
+            return []
+
+
 class JiraDetailController(QObject):
     """
     Controller to manage the logic for the JiraDetailView.
@@ -166,6 +351,7 @@ class JiraDetailController(QObject):
         self._attachment_widgets = []
         self._download_workers = []
         self._thumbnail_workers = []
+        self._links_loader_worker = None
         self._active_note_editor = None
         self._current_note_title = None # Track the title of the active note
         
@@ -221,11 +407,16 @@ class JiraDetailController(QObject):
             # 1. Fetch issue data from Jira
             self._issue_data = self.jira_service.get_issue(self.jira_key)
             
+            # Check if we successfully got issue data
+            if self._issue_data is None:
+                raise Exception(f"Failed to load issue data for {self.jira_key}")
+            
             # 2. Populate the view with the data
             self._populate_details()
             self._populate_comments()
             self._populate_attachments()
             self._populate_annotations()
+            self._start_async_links_loading()  # Start async loading of issue links
             self._load_time_history()
             
             # 3. Update notification subscription button
@@ -234,11 +425,15 @@ class JiraDetailController(QObject):
         except Exception as e:
             self.view.details_browser.setText(f"<b>Error loading issue data:</b><br>{e}")
             print(f"Error in JiraDetailController: {e}")
+            # Don't populate other tabs if issue data failed to load
+            return
 
     def _populate_details(self):
         """Populates the 'Details' tab."""
-        if not self._issue_data: return
-        
+        if not self._issue_data:
+            self.view.details_browser.setHtml("<p><i>No issue data available.</i></p>")
+            return
+            
         fields = self._issue_data.get('fields', {})
         
         # Use raw description field for markdown conversion
@@ -262,7 +457,9 @@ class JiraDetailController(QObject):
 
     def _populate_comments(self):
         """Populates the 'Comments' tab with formatted HTML."""
-        if not self._issue_data: return
+        if not self._issue_data:
+            self.view.comments_browser.setHtml("<p><i>No issue data available.</i></p>")
+            return
 
         comments = self._issue_data.get('renderedFields', {}).get('comment', {}).get('comments', [])
         
@@ -335,6 +532,15 @@ class JiraDetailController(QObject):
         """Populates the 'Attachments' tab and starts automatic downloads."""
         # Clear existing attachments
         self._clear_attachment_widgets()
+        
+        if not self._issue_data:
+            # Show "no data" message
+            no_data_label = QLabel("No issue data available.")
+            no_data_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.view.attachments_layout.addWidget(no_data_label)
+            self.view.download_selected_btn.setEnabled(False)
+            self.view.download_all_btn.setEnabled(False)
+            return
         
         self._attachments_data = self._issue_data.get('fields', {}).get('attachment', [])
         self._attachment_widgets = []
@@ -897,6 +1103,11 @@ class JiraDetailController(QObject):
         for worker in self._thumbnail_workers:
             worker.cancel()
         
+        # Cancel links loader
+        if self._links_loader_worker:
+            self._links_loader_worker.cancel()
+            self._links_loader_worker.wait()
+        
         # Wait for all workers to finish
         for worker in self._download_workers:
             worker.wait()
@@ -1347,6 +1558,92 @@ class JiraDetailController(QObject):
         except Exception as e:
             QMessageBox.warning(self.view, "Errore", f"Impossibile aprire il file: {e}")
     
+    def _start_async_links_loading(self):
+        """Start asynchronous loading of issue links with loading indicator."""
+        # Show loading indicator
+        self.view.issue_links_tree.clear()
+        loading_item = self.view.issue_links_tree.addTopLevelItem(
+            self.view.create_tree_item("Caricamento collegamenti...", "", "", "loading")
+        )
+        self.view.issue_links_tree.setEnabled(False)
+        
+        # Cancel any existing links loader
+        if self._links_loader_worker:
+            self._links_loader_worker.cancel()
+            self._links_loader_worker.wait()
+        
+        # Start new links loader
+        self._links_loader_worker = IssueLinksLoaderWorker(self.jira_service, self.jira_key)
+        self._links_loader_worker.links_loaded.connect(self._on_links_loaded)
+        self._links_loader_worker.links_error.connect(self._on_links_error)
+        self._links_loader_worker.start()
+
+    @pyqtSlot(list)
+    def _on_links_loaded(self, links_tree):
+        """Handle successful loading of issue links."""
+        try:
+            # Clear loading indicator
+            self.view.issue_links_tree.clear()
+            self.view.issue_links_tree.setEnabled(True)
+            
+            if not links_tree:
+                # No links found
+                no_links_item = self.view.issue_links_tree.addTopLevelItem(
+                    self.view.create_tree_item("Nessun collegamento trovato", "", "", "info")
+                )
+                return
+            
+            # Build the tree structure
+            self._build_links_tree_widget(links_tree)
+            
+            # Expand the root item
+            if self.view.issue_links_tree.topLevelItemCount() > 0:
+                self.view.issue_links_tree.topLevelItem(0).setExpanded(True)
+            
+        except Exception as e:
+            print(f"Error building links tree: {e}")
+            self._on_links_error("Errore nella costruzione dell'albero dei collegamenti")
+    
+    @pyqtSlot(str)
+    def _on_links_error(self, error_message):
+        """Handle error loading issue links."""
+        self.view.issue_links_tree.clear()
+        self.view.issue_links_tree.setEnabled(True)
+        
+        error_item = self.view.issue_links_tree.addTopLevelItem(
+            self.view.create_tree_item(f"Errore: {error_message}", "", "", "error")
+        )
+    
+    def _build_links_tree_widget(self, links_tree):
+        """Build the QTreeWidget from the links tree data."""
+        for root_data in links_tree:
+            root_item = self.view.create_tree_item(
+                root_data['key'],
+                root_data['summary'],
+                root_data['status'],
+                root_data['type']
+            )
+            self.view.issue_links_tree.addTopLevelItem(root_item)
+            
+            # Add children recursively
+            self._add_tree_children(root_item, root_data['children'])
+    
+    def _add_tree_children(self, parent_item, children_data):
+        """Recursively add children to a tree item."""
+        for child_data in children_data:
+            child_item = self.view.create_tree_item(
+                child_data['key'],
+                child_data['summary'],
+                child_data.get('status', ''),
+                child_data.get('direction', 'child'),
+                child_data.get('link_type', '')
+            )
+            parent_item.addChild(child_item)
+            
+            # Add grandchildren if any
+            if child_data.get('children'):
+                self._add_tree_children(child_item, child_data['children'])
+
     def _format_time(self, total_seconds):
         """Formats the time in HH:MM:SS."""
         hours = total_seconds // 3600
