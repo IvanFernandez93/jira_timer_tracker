@@ -120,6 +120,7 @@ class MainController(QObject):
         self.view.lastActiveRequested.connect(self._show_last_active_jira)
         self.view.settingsRequested.connect(self._show_settings_dialog)
         self.view.searchJqlRequested.connect(self._show_jql_history_dialog)
+        self.view.notesRequested.connect(self._show_notes_grid_dialog)
         self.view.syncQueueRequested.connect(self._show_sync_queue_dialog)
         self.view.notificationsRequested.connect(self._show_notifications_dialog)
 
@@ -597,6 +598,12 @@ class MainController(QObject):
         jql_history_controller = JqlHistoryController(self.db_service, from_grid=True)
         jql_history_controller.view.jql_selected.connect(self._on_jql_selected_from_history)
         jql_history_controller.run()
+        
+    def _show_notes_grid_dialog(self):
+        """Shows the notes grid dialog."""
+        from views.notes_grid_dialog import NotesGridDialog
+        notes_dialog = NotesGridDialog(self.db_service, parent=self.view)
+        notes_dialog.exec()
         
     def _on_jql_selected_from_history(self, query):
         """Applies a JQL query selected from the history dialog."""

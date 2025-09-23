@@ -17,6 +17,7 @@ class MainWindow(FluentWindow):
     lastActiveRequested = pyqtSignal()
     settingsRequested = pyqtSignal()
     searchJqlRequested = pyqtSignal()
+    notesRequested = pyqtSignal()
     syncQueueRequested = pyqtSignal()
     notificationsRequested = pyqtSignal()
     closing = pyqtSignal()  # Signal emitted when window is closing
@@ -75,6 +76,16 @@ class MainWindow(FluentWindow):
         )
         self.search_item.setToolTip("Esegui una ricerca avanzata con JQL")
 
+        # Notes Grid button
+        self.notes_item = self.navigationInterface.addItem(
+            "notes_grid",
+            FIF.DOCUMENT,
+            "Tutte le Note",
+            position=NavigationItemPosition.TOP,
+            onClick=self.onNotesClicked
+        )
+        self.notes_item.setToolTip("Visualizza tutte le note in una griglia")
+
         # Sync Queue button
         self.navigationInterface.addSeparator()
         self.sync_queue_item = self.navigationInterface.addItem(
@@ -103,6 +114,10 @@ class MainWindow(FluentWindow):
     @pyqtSlot()
     def onSearchJqlClicked(self):
         self.searchJqlRequested.emit()
+
+    @pyqtSlot()
+    def onNotesClicked(self):
+        self.notesRequested.emit()
 
     @pyqtSlot()
     def onSettingsClicked(self):

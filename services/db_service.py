@@ -275,6 +275,16 @@ class DatabaseService:
         finally:
             conn.close()
 
+    def get_all_annotations(self) -> list:
+        """Retrieves all annotations across all Jira keys."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT JiraKey, Title, UpdatedAt FROM Annotations ORDER BY UpdatedAt DESC')
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
     # --- Local Time Log Methods ---
     def get_local_time(self, jira_key: str) -> int:
         """Gets the locally tracked seconds for a specific Jira issue."""
