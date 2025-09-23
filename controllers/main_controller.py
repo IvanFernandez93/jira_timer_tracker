@@ -923,6 +923,9 @@ class MainController(QObject):
         # Salva lo stato del filtro nei settings
         self.app_settings.set_setting('favorites_filter_enabled', 'true' if checked else 'false')
         
+        # Inizializza favorite_keys a None (verrà impostato solo se checked è True)
+        favorite_keys = None
+        
         # Aggiorna l'aspetto del pulsante
         if checked:
             # Cambia il titolo per indicare che stiamo visualizzando i preferiti
@@ -955,7 +958,7 @@ class MainController(QObject):
             self.view.jira_grid_view.favorites_btn.setStyleSheet("")
 
         # Trigger a full reload
-        self.load_jira_issues(append=False, favorite_keys=favorite_keys if checked else None)
+        self.load_jira_issues(append=False, favorite_keys=favorite_keys)
 
     def _adjust_window_flags_for_detail(self, detail_window):
         """Ensure detail_window appears above main when main is always-on-top.

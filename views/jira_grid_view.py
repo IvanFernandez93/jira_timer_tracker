@@ -342,53 +342,84 @@ class JiraGridView(QWidget):
         from PyQt6.QtCore import Qt
         from PyQt6.QtWidgets import QApplication
         
-        # Check if Shift is pressed for cumulative sorting
-        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
-            # Cumulative sorting: add this column to sort order
-            existing_sort = next((item for item in self.sort_columns if item['column'] == logical_index), None)
+        # Identificare se questa è la colonna dei favoriti
+        is_favorite_column = False
+        visible_columns = self.get_visible_columns()
+        
+        # Evita ordinamento sulla colonna dei favoriti
+        if 0 <= logical_index < len(visible_columns):
+            is_favorite_column = visible_columns[logical_index].get('id') == 'favorite'
+        
+        if is_favorite_column:
+            # Non permettiamo l'ordinamento sulla colonna dei preferiti
+            return
             
-            if existing_sort:
-                # Toggle sort order for existing column
-                existing_sort['order'] = Qt.SortOrder.DescendingOrder if existing_sort['order'] == Qt.SortOrder.AscendingOrder else Qt.SortOrder.AscendingOrder
+        try:
+            # Check if Shift is pressed for cumulative sorting
+            if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+                # Cumulative sorting: add this column to sort order
+                existing_sort = next((item for item in self.sort_columns if item['column'] == logical_index), None)
+                
+                if existing_sort:
+                    # Toggle sort order for existing column
+                    existing_sort['order'] = Qt.SortOrder.DescendingOrder if existing_sort['order'] == Qt.SortOrder.AscendingOrder else Qt.SortOrder.AscendingOrder
+                else:
+                    # Add new column to sort order
+                    self.sort_columns.append({
+                        'column': logical_index,
+                        'order': Qt.SortOrder.AscendingOrder
+                    })
             else:
-                # Add new column to sort order
-                self.sort_columns.append({
+                # Normal sorting: clear previous sorts and set new primary sort
+                current_order = Qt.SortOrder.AscendingOrder
+                if self.sort_columns and self.sort_columns[0]['column'] == logical_index:
+                    current_order = Qt.SortOrder.DescendingOrder if self.sort_columns[0]['order'] == Qt.SortOrder.AscendingOrder else Qt.SortOrder.AscendingOrder
+                
+                self.sort_columns = [{
                     'column': logical_index,
-                    'order': Qt.SortOrder.AscendingOrder
-                })
-        else:
-            # Normal sorting: clear previous sorts and set new primary sort
-            current_order = Qt.SortOrder.AscendingOrder
-            if self.sort_columns and self.sort_columns[0]['column'] == logical_index:
-                current_order = Qt.SortOrder.DescendingOrder if self.sort_columns[0]['order'] == Qt.SortOrder.AscendingOrder else Qt.SortOrder.AscendingOrder
+                    'order': current_order
+                }]
             
-            self.sort_columns = [{
-                'column': logical_index,
-                'order': current_order
-            }]
-        
-        # Apply the cumulative sort
-        self._apply_cumulative_sort()
-        
-        # Save sort order to settings
-        self._save_sort_order()
+            # Apply the cumulative sort
+            self._apply_cumulative_sort()
+            
+            # Save sort order to settings
+            self._save_sort_order()
+        except Exception as e:
+            import traceback
+            print(f"Error in _on_header_clicked: {e}")
+            print(traceback.format_exc())
     
     def _apply_cumulative_sort(self):
         """Apply cumulative sorting to the table."""
         if not self.sort_columns:
             return
             
+        # Identify favorite column index (typically 4, but could be different)
+        favorite_col_index = -1
+        for i, col in enumerate(self.get_visible_columns()):
+            if col.get('id') == 'favorite':
+                favorite_col_index = i
+                break
+                
+        if favorite_col_index == -1:
+            # Fallback if favorite column not found
+            favorite_col_index = self.table.columnCount() - 1
+            
         # Get all table data
         table_data = []
         for row in range(self.table.rowCount()):
             row_data = []
-            for col in range(self.table.columnCount() - 1):  # Exclude favorite column
-                item = self.table.item(row, col)
-                row_data.append(item.text() if item else "")
-            
-            # Store widget from favorite column
-            favorite_widget = self.table.cellWidget(row, 4)
-            row_data.append(favorite_widget)
+            # Get data from all columns except the favorite column
+            for col in range(self.table.columnCount()):
+                if col != favorite_col_index:
+                    item = self.table.item(row, col)
+                    row_data.append(item.text() if item else "")
+                else:
+                    # For the favorite column, store the widget itself
+                    widget = self.table.cellWidget(row, col)
+                    # Also store the column index for later
+                    row_data.append((widget, col))
             table_data.append(row_data)
         
         # Sort data using multiple criteria
@@ -396,13 +427,31 @@ class JiraGridView(QWidget):
             key = []
             for sort_info in reversed(self.sort_columns):  # Process in reverse order for stable sort
                 col_index = sort_info['column']
-                if col_index < len(row_data) - 1:  # Exclude favorite column from sorting
-                    value = row_data[col_index]
+                # Skip the favorite column index
+                if col_index == favorite_col_index:
+                    continue
+                    
+                # Adjust index if needed
+                adjusted_index = col_index
+                if col_index > favorite_col_index:
+                    adjusted_index = col_index - 1
+                    
+                if adjusted_index < len(row_data) - 1:  # -1 for the favorite widget tuple
+                    value = row_data[adjusted_index]
+                    
                     # Handle numeric sorting for time column
-                    if col_index == 3:  # Time Spent column
+                    # Get the column ID for this index
+                    visible_columns = self.get_visible_columns()
+                    is_time_column = False
+                    
+                    # Safely check if this is the time_spent column
+                    if 0 <= col_index < len(visible_columns):
+                        is_time_column = visible_columns[col_index].get('id') == 'time_spent'
+                    
+                    if is_time_column:
                         try:
                             # Extract hours and minutes
-                            if 'h' in value and 'm' in value:
+                            if isinstance(value, str) and 'h' in value and 'm' in value:
                                 parts = value.replace('h', '').replace('m', '').split()
                                 hours = int(parts[0]) if len(parts) > 0 else 0
                                 minutes = int(parts[1]) if len(parts) > 1 else 0
@@ -410,29 +459,46 @@ class JiraGridView(QWidget):
                             else:
                                 numeric_value = 0
                             key.append((numeric_value, sort_info['order'] == Qt.SortOrder.DescendingOrder))
-                        except:
+                        except Exception:
                             key.append((0, sort_info['order'] == Qt.SortOrder.DescendingOrder))
                     else:
                         # String sorting
-                        key.append((value.lower(), sort_info['order'] == Qt.SortOrder.DescendingOrder))
+                        key.append((str(value).lower(), sort_info['order'] == Qt.SortOrder.DescendingOrder))
             return key
         
-        # Sort the data
-        sorted_data = sorted(table_data, key=sort_key, reverse=False)
-        
-        # Clear table and repopulate with sorted data
-        self.table.setRowCount(0)
-        for row_data in sorted_data:
-            row_position = self.table.rowCount()
-            self.table.insertRow(row_position)
+        try:
+            # Sort the data
+            sorted_data = sorted(table_data, key=sort_key, reverse=False)
             
-            # Add text items
-            for col in range(len(row_data) - 1):
-                self.table.setItem(row_position, col, QTableWidgetItem(row_data[col]))
-            
-            # Add favorite widget
-            if row_data[-1]:
-                self.table.setCellWidget(row_position, 4, row_data[-1])
+            # Clear table and repopulate with sorted data
+            self.table.setRowCount(0)
+            for row_data in sorted_data:
+                row_position = self.table.rowCount()
+                self.table.insertRow(row_position)
+                
+                # Extract favorite widget and its column index
+                favorite_widget_info = None
+                for i, item in enumerate(row_data):
+                    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], int):
+                        favorite_widget_info = item
+                        break
+                
+                # Add text items and skip the favorite widget tuple
+                col_offset = 0
+                for i, item in enumerate(row_data):
+                    if not isinstance(item, tuple) or len(item) != 2 or not isinstance(item[1], int):
+                        self.table.setItem(row_position, i + col_offset, QTableWidgetItem(str(item)))
+                    else:
+                        # Adjust offset when we skip the favorite widget tuple
+                        col_offset = -1
+                
+                # Add favorite widget if we have it
+                if favorite_widget_info and favorite_widget_info[0]:
+                    self.table.setCellWidget(row_position, favorite_widget_info[1], favorite_widget_info[0])
+        except Exception as e:
+            import traceback
+            print(f"Error in _apply_cumulative_sort: {e}")
+            print(traceback.format_exc())
     
     def _save_sort_order(self):
         """Save current sort order to settings."""
