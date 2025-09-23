@@ -31,7 +31,7 @@ class JqlHistoryController:
         self._load_history()
         self._load_favorites()
         self._update_button_states()
-        return self.view.exec()
+        self.view.show()
     
     def _load_history(self):
         """Load JQL history from the database."""

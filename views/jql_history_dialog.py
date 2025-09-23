@@ -206,12 +206,6 @@ class JqlHistoryDialog(QDialog):
                 pass
 
     def showEvent(self, event):
-        try:
-            from services.ui_utils import apply_always_on_top
-            apply_always_on_top(self)
-        except Exception:
-            pass
-
         super().showEvent(event)
         
     def show_error(self, title, message):

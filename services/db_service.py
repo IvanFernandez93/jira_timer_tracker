@@ -66,13 +66,50 @@ class DatabaseService:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS Annotations (
                     Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    JiraKey TEXT NOT NULL,
+                    JiraKey TEXT,
                     Title TEXT NOT NULL,
                     Content TEXT,
+                    Tags TEXT,
+                    IsDeleted INTEGER NOT NULL DEFAULT 0,
+                    DeletedAt DATETIME,
                     CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
                     UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Annotations Table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS Annotations (
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    JiraKey TEXT,
+                    Title TEXT NOT NULL,
+                    Content TEXT,
+                    Tags TEXT,
+                    IsDeleted INTEGER NOT NULL DEFAULT 0,
+                    DeletedAt DATETIME,
+                    CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            
+            # Add new columns to Annotations table if they don't exist
+            try:
+                cursor.execute("SELECT Tags FROM Annotations LIMIT 1")
+            except sqlite3.OperationalError:
+                print("Adding Tags column to Annotations table")
+                cursor.execute("ALTER TABLE Annotations ADD COLUMN Tags TEXT")
+            
+            try:
+                cursor.execute("SELECT IsDeleted FROM Annotations LIMIT 1")
+            except sqlite3.OperationalError:
+                print("Adding IsDeleted column to Annotations table")
+                cursor.execute("ALTER TABLE Annotations ADD COLUMN IsDeleted INTEGER NOT NULL DEFAULT 0")
+                
+            try:
+                cursor.execute("SELECT DeletedAt FROM Annotations LIMIT 1")
+            except sqlite3.OperationalError:
+                print("Adding DeletedAt column to Annotations table")
+                cursor.execute("ALTER TABLE Annotations ADD COLUMN DeletedAt DATETIME")
+            
             # SyncQueue Table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS SyncQueue (
@@ -221,12 +258,291 @@ class DatabaseService:
 
     # --- Annotation Management ---
 
-    def save_annotation(self, jira_key: str, title: str, content: str):
-        """Saves or updates an annotation based on Jira key and title."""
+    def create_note(self, jira_key: str = None, title: str = "", content: str = "", tags: str = "") -> int:
+        """Creates a new note and returns its ID."""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT Id FROM Annotations WHERE JiraKey = ? AND Title = ?", (jira_key, title))
+            cursor.execute(
+                'INSERT INTO Annotations (JiraKey, Title, Content, Tags, IsDeleted) VALUES (?, ?, ?, ?, 0)',
+                (jira_key, title, content, tags)
+            )
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
+
+    def get_note_by_id(self, note_id: int) -> dict:
+        """Gets a note by its ID."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE Id = ?',
+                (note_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            
+            return {
+                'id': row[0],
+                'jira_key': row[1],
+                'title': row[2],
+                'content': row[3],
+                'tags': row[4] or '',
+                'is_deleted': bool(row[5]),
+                'deleted_at': row[6],
+                'created_at': row[7],
+                'updated_at': row[8]
+            }
+        finally:
+            conn.close()
+
+    def update_note(self, note_id: int, jira_key: str = None, title: str = None, content: str = None, tags: str = None):
+        """Updates a note with the provided fields."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Build the update query based on provided data
+            updates = []
+            params = []
+            
+            if jira_key is not None:
+                updates.append('JiraKey = ?')
+                params.append(jira_key)
+                
+            if title is not None:
+                updates.append('Title = ?')
+                params.append(title)
+                
+            if content is not None:
+                updates.append('Content = ?')
+                params.append(content)
+                
+            if tags is not None:
+                updates.append('Tags = ?')
+                params.append(tags)
+            
+            if not updates:
+                return
+            
+            # Always update UpdatedAt
+            updates.append('UpdatedAt = CURRENT_TIMESTAMP')
+            
+            # Add note_id to params
+            params.append(note_id)
+            
+            # Execute update
+            query = f"UPDATE Annotations SET {', '.join(updates)} WHERE Id = ?"
+            cursor.execute(query, params)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_note_soft(self, note_id: int):
+        """Soft deletes a note (marks as deleted)."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE Annotations SET IsDeleted = 1, DeletedAt = CURRENT_TIMESTAMP WHERE Id = ?',
+                (note_id,)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_note_hard(self, note_id: int):
+        """Hard deletes a note (permanently removes it)."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM Annotations WHERE Id = ?', (note_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def restore_note(self, note_id: int):
+        """Restores a soft-deleted note."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE Annotations SET IsDeleted = 0, DeletedAt = NULL WHERE Id = ?',
+                (note_id,)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_all_notes(self, include_deleted: bool = False) -> list:
+        """Gets all notes, optionally including deleted ones."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            if include_deleted:
+                cursor.execute(
+                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations ORDER BY UpdatedAt DESC'
+                )
+            else:
+                cursor.execute(
+                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE IsDeleted = 0 ORDER BY UpdatedAt DESC'
+                )
+            
+            notes = []
+            for row in cursor.fetchall():
+                notes.append({
+                    'id': row[0],
+                    'jira_key': row[1],
+                    'title': row[2],
+                    'content': row[3],
+                    'tags': row[4] or '',
+                    'is_deleted': bool(row[5]),
+                    'deleted_at': row[6],
+                    'created_at': row[7],
+                    'updated_at': row[8]
+                })
+            return notes
+        finally:
+            conn.close()
+
+    def get_notes_by_jira_key(self, jira_key: str, include_deleted: bool = False) -> list:
+        """Gets all notes for a specific Jira key."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            if include_deleted:
+                cursor.execute(
+                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE JiraKey = ? ORDER BY UpdatedAt DESC',
+                    (jira_key,)
+                )
+            else:
+                cursor.execute(
+                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE JiraKey = ? AND IsDeleted = 0 ORDER BY UpdatedAt DESC',
+                    (jira_key,)
+                )
+            
+            notes = []
+            for row in cursor.fetchall():
+                notes.append({
+                    'id': row[0],
+                    'jira_key': row[1],
+                    'title': row[2],
+                    'content': row[3],
+                    'tags': row[4] or '',
+                    'is_deleted': bool(row[5]),
+                    'deleted_at': row[6],
+                    'created_at': row[7],
+                    'updated_at': row[8]
+                })
+            return notes
+        finally:
+            conn.close()
+
+    def get_notes_by_tags(self, tags: list, include_deleted: bool = False) -> list:
+        """Gets notes that have any of the specified tags."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Build query with tag filtering
+            tag_conditions = []
+            params = []
+            
+            for tag in tags:
+                tag_conditions.append('Tags LIKE ?')
+                params.append(f'%{tag}%')
+            
+            tag_filter = ' OR '.join(tag_conditions)
+            
+            if include_deleted:
+                query = f'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE ({tag_filter}) ORDER BY UpdatedAt DESC'
+            else:
+                query = f'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE ({tag_filter}) AND IsDeleted = 0 ORDER BY UpdatedAt DESC'
+            
+            cursor.execute(query, params)
+            
+            notes = []
+            for row in cursor.fetchall():
+                notes.append({
+                    'id': row[0],
+                    'jira_key': row[1],
+                    'title': row[2],
+                    'content': row[3],
+                    'tags': row[4] or '',
+                    'is_deleted': bool(row[5]),
+                    'deleted_at': row[6],
+                    'created_at': row[7],
+                    'updated_at': row[8]
+                })
+            return notes
+        finally:
+            conn.close()
+
+    def search_notes(self, search_term: str, include_deleted: bool = False) -> list:
+        """Searches notes by title, content, or Jira key."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            search_pattern = f'%{search_term}%'
+            
+            if include_deleted:
+                cursor.execute(
+                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE (Title LIKE ? OR Content LIKE ? OR JiraKey LIKE ?) ORDER BY UpdatedAt DESC',
+                    (search_pattern, search_pattern, search_pattern)
+                )
+            else:
+                cursor.execute(
+                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE (Title LIKE ? OR Content LIKE ? OR JiraKey LIKE ?) AND IsDeleted = 0 ORDER BY UpdatedAt DESC',
+                    (search_pattern, search_pattern, search_pattern)
+                )
+            
+            notes = []
+            for row in cursor.fetchall():
+                notes.append({
+                    'id': row[0],
+                    'jira_key': row[1],
+                    'title': row[2],
+                    'content': row[3],
+                    'tags': row[4] or '',
+                    'is_deleted': bool(row[5]),
+                    'deleted_at': row[6],
+                    'created_at': row[7],
+                    'updated_at': row[8]
+                })
+            return notes
+        finally:
+            conn.close()
+
+    def get_all_tags(self) -> list:
+        """Gets all unique tags from all notes."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT DISTINCT Tags FROM Annotations WHERE Tags IS NOT NULL AND Tags != "" AND IsDeleted = 0')
+            
+            all_tags = set()
+            for row in cursor.fetchall():
+                if row[0]:
+                    # Split tags by comma and clean them
+                    tags = [tag.strip() for tag in row[0].split(',') if tag.strip()]
+                    all_tags.update(tags)
+            
+            return sorted(list(all_tags))
+        finally:
+            conn.close()
+
+    # --- Legacy Annotation Methods (for backward compatibility) ---
+
+    def save_annotation(self, jira_key: str, title: str, content: str):
+        """Saves or updates an annotation based on Jira key and title (legacy method)."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT Id FROM Annotations WHERE JiraKey = ? AND Title = ? AND IsDeleted = 0", (jira_key, title))
             result = cursor.fetchone()
             if result:
                 cursor.execute(
@@ -235,7 +551,7 @@ class DatabaseService:
                 )
             else:
                 cursor.execute(
-                    "INSERT INTO Annotations (JiraKey, Title, Content) VALUES (?, ?, ?)",
+                    "INSERT INTO Annotations (JiraKey, Title, Content, IsDeleted) VALUES (?, ?, ?, 0)",
                     (jira_key, title, content)
                 )
             conn.commit()
@@ -243,32 +559,34 @@ class DatabaseService:
             conn.close()
 
     def get_annotations(self, jira_key: str) -> list:
-        """Retrieves all annotations for a given Jira key."""
+        """Retrieves all annotations for a given Jira key (legacy method)."""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute('SELECT Title, Content FROM Annotations WHERE JiraKey = ? ORDER BY Title', (jira_key,))
+            cursor.execute('SELECT Title, Content FROM Annotations WHERE JiraKey = ? AND IsDeleted = 0 ORDER BY Title', (jira_key,))
             return cursor.fetchall()
         finally:
             conn.close()
 
     def delete_annotation(self, jira_key: str, title: str):
-        """Deletes a specific annotation."""
+        """Deletes a specific annotation (legacy method - now soft delete)."""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM Annotations WHERE JiraKey = ? AND Title = ?", (jira_key, title))
-            conn.commit()
+            cursor.execute("SELECT Id FROM Annotations WHERE JiraKey = ? AND Title = ? AND IsDeleted = 0", (jira_key, title))
+            result = cursor.fetchone()
+            if result:
+                self.delete_note_soft(result[0])
         finally:
             conn.close()
 
     def rename_annotation(self, jira_key: str, old_title: str, new_title: str):
-        """Renames an annotation title."""
+        """Renames an annotation title (legacy method)."""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE Annotations SET Title = ? WHERE JiraKey = ? AND Title = ?",
+                "UPDATE Annotations SET Title = ?, UpdatedAt = CURRENT_TIMESTAMP WHERE JiraKey = ? AND Title = ? AND IsDeleted = 0",
                 (new_title, jira_key, old_title)
             )
             conn.commit()
@@ -276,11 +594,11 @@ class DatabaseService:
             conn.close()
 
     def get_all_annotations(self) -> list:
-        """Retrieves all annotations across all Jira keys."""
+        """Retrieves all annotations across all Jira keys (legacy method)."""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute('SELECT JiraKey, Title, UpdatedAt FROM Annotations ORDER BY UpdatedAt DESC')
+            cursor.execute('SELECT JiraKey, Title, UpdatedAt FROM Annotations WHERE IsDeleted = 0 ORDER BY UpdatedAt DESC')
             return cursor.fetchall()
         finally:
             conn.close()

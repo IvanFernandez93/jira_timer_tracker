@@ -1,4 +1,4 @@
-from PyQt6.QtCore import QObject, pyqtSignal, QThread, Qt, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, QThread, Qt, QTimer, QEvent
 from PyQt6.QtWidgets import QTableWidgetItem, QPushButton, QApplication
 from qfluentwidgets import FluentIcon as FIF
 import logging
@@ -32,6 +32,7 @@ class MainController(QObject):
         self._active_threads: list[QThread] = []
         # Track active worker objects so they are not garbage-collected
         self._active_workers: list[object] = []
+        self._open_dialog_windows = []  # Track open dialog windows
         
         # Initialize properties used for data loading
         self.is_loading = False
@@ -67,6 +68,11 @@ class MainController(QObject):
         self.view.jira_grid_view.set_app_settings(self.app_settings)
         # Apply always-on-top setting from persisted settings
         self._apply_always_on_top()
+        # Install an event filter on the main view to detect activation events
+        try:
+            self.view.installEventFilter(self)
+        except Exception:
+            pass
 
     def _setup_mini_widget(self):
         """Initializes the mini widget and its controller."""
@@ -120,7 +126,7 @@ class MainController(QObject):
         self.view.lastActiveRequested.connect(self._show_last_active_jira)
         self.view.settingsRequested.connect(self._show_settings_dialog)
         self.view.searchJqlRequested.connect(self._show_jql_history_dialog)
-        self.view.notesRequested.connect(self._show_notes_grid_dialog)
+        self.view.notesRequested.connect(self._show_notes_manager_dialog)
         self.view.syncQueueRequested.connect(self._show_sync_queue_dialog)
         self.view.notificationsRequested.connect(self._show_notifications_dialog)
 
@@ -424,22 +430,45 @@ class MainController(QObject):
         from views.config_dialog import ConfigDialog
         from controllers.config_controller import ConfigController
         
-        # Parent the configuration dialog to the main window so stacking is correct
-        config_dialog = ConfigDialog(self.view)
+        # Create dialog without parent for true independence
+        config_dialog = ConfigDialog(parent=None)
+        
+        # Ensure dialog is top-level, non-modal, and will not be closed when main is activated
+        try:
+            config_dialog.setWindowFlag(Qt.WindowType.Window, True)
+            config_dialog.setModal(False)
+        except Exception:
+            pass
+            
         config_controller = ConfigController(
             config_dialog, 
             self.jira_service, 
             self.app_settings, 
             self.db_service.credential_service
         )
+        
         # Apply changes immediately when settings are saved
         try:
             config_controller.settings_saved.connect(self._apply_always_on_top)
         except Exception:
             pass
+            
+        # Track the dialog window
+        self._open_dialog_windows.append(config_dialog)
+        config_dialog.destroyed.connect(lambda: self._on_dialog_window_closed(config_dialog))
+        
+        # Set DB service
         config_controller.set_db_service(self.db_service)
+        
+        # Show the dialog now
+        config_dialog.show()
+        config_dialog.raise_()
+        config_dialog.activateWindow()
+        
+        # Finish controller setup (might do other initialization)
         config_controller.run()
-        # Re-apply settings after dialog is closed in case the user saved changes
+        
+        # Re-apply settings after dialog is shown in case defaults need to be applied
         try:
             self._apply_always_on_top()
         except Exception:
@@ -596,15 +625,63 @@ class MainController(QObject):
             
     def _show_jql_history_dialog(self):
         """Shows the JQL history dialog."""
-        jql_history_controller = JqlHistoryController(self.db_service, from_grid=True)
-        jql_history_controller.view.jql_selected.connect(self._on_jql_selected_from_history)
-        jql_history_controller.run()
+        try:
+            self._logger.debug("Opening JQL history dialog...")
+            jql_history_controller = JqlHistoryController(self.db_service, from_grid=True)
+            
+            # Ensure dialog is top-level, non-modal, and will not be closed when main is activated
+            try:
+                jql_history_controller.view.setWindowFlag(Qt.WindowType.Window, True)
+                jql_history_controller.view.setModal(False)
+            except Exception:
+                pass
+                
+            jql_history_controller.view.jql_selected.connect(self._on_jql_selected_from_history)
+            
+            # Track the dialog window
+            self._open_dialog_windows.append(jql_history_controller.view)
+            jql_history_controller.view.destroyed.connect(lambda: self._on_dialog_window_closed(jql_history_controller.view))
+            
+            # Show the view now
+            jql_history_controller.view.show()
+            jql_history_controller.view.raise_()
+            jql_history_controller.view.activateWindow()
+            
+            # Finish controller setup (might do other initialization)
+            jql_history_controller.run()
+            
+            self._logger.debug("JQL history dialog opened successfully")
+        except Exception as e:
+            self._logger.error(f"Error opening JQL history dialog: {e}")
+            import traceback
+            self._logger.error(traceback.format_exc())
         
-    def _show_notes_grid_dialog(self):
-        """Shows the notes grid dialog."""
-        from views.notes_grid_dialog import NotesGridDialog
-        notes_dialog = NotesGridDialog(self.db_service, parent=self.view)
-        notes_dialog.exec()
+    def _show_notes_manager_dialog(self):
+        """Shows the notes manager dialog."""
+        try:
+            from views.notes_manager_dialog import NotesManagerDialog
+            notes_dialog = NotesManagerDialog(self.db_service, self.app_settings, parent=None)  # No parent for top-level
+            
+            # Ensure dialog is top-level, non-modal, and will not be closed when main is activated
+            try:
+                notes_dialog.setWindowFlag(Qt.WindowType.Window, True)
+                notes_dialog.setModal(False)
+            except Exception:
+                pass
+            
+            # Track the dialog window
+            self._open_dialog_windows.append(notes_dialog)
+            notes_dialog.destroyed.connect(lambda: self._on_dialog_window_closed(notes_dialog))
+            
+            # Show the dialog now
+            notes_dialog.show()
+            notes_dialog.raise_()
+            notes_dialog.activateWindow()
+            
+        except Exception as e:
+            self._logger.error(f"Error opening notes manager dialog: {e}")
+            import traceback
+            self._logger.error(traceback.format_exc())
         
     def _on_jql_selected_from_history(self, query):
         """Applies a JQL query selected from the history dialog."""
@@ -730,9 +807,13 @@ class MainController(QObject):
                 except Exception:
                     pass
                 try:
-                    # Clear frameless if present
-                    df = detail_window.windowFlags() & ~Qt.WindowType.FramelessWindowHint
-                    detail_window.setWindowFlags(df)
+                    # Clear frameless hint using non-destructive API where available
+                    try:
+                        detail_window.setWindowFlag(Qt.WindowType.FramelessWindowHint, False)
+                    except Exception:
+                        # Fallback to bitmask change if needed
+                        df = detail_window.windowFlags() & ~Qt.WindowType.FramelessWindowHint
+                        detail_window.setWindowFlags(df)
                 except Exception:
                     pass
                 try:
@@ -785,12 +866,13 @@ class MainController(QObject):
                                  self.view.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) if hasattr(self.view, 'testAttribute') else None)
                 except Exception:
                     pass
-                # Remove the always-on-top hint but DO NOT call show() to avoid bringing
-                # the main window to the foreground. We'll rely on processEvents() to
-                # allow the windowing system to apply flag changes.
-                main_flags = main_flags & ~Qt.WindowType.WindowStaysOnTopHint
+                # Remove the always-on-top hint using a non-destructive API where possible
                 try:
-                    self.view.setWindowFlags(main_flags)
+                    try:
+                        self.view.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+                    except Exception:
+                        main_flags = main_flags & ~Qt.WindowType.WindowStaysOnTopHint
+                        self.view.setWindowFlags(main_flags)
                     # Process pending events so the flag change takes effect without
                     # forcing a show()/raise which would steal focus.
                     QApplication.processEvents()
@@ -809,9 +891,12 @@ class MainController(QObject):
                                  detail_window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) if hasattr(detail_window, 'testAttribute') else None)
                 except Exception:
                     pass
-                # clear frameless and translucent hints if present
-                detail_flags = detail_flags & ~Qt.WindowType.FramelessWindowHint
-                detail_window.setWindowFlags(detail_flags)
+                # clear frameless and translucent hints if present using non-destructive API
+                try:
+                    detail_window.setWindowFlag(Qt.WindowType.FramelessWindowHint, False)
+                except Exception:
+                    detail_flags = detail_flags & ~Qt.WindowType.FramelessWindowHint
+                    detail_window.setWindowFlags(detail_flags)
                 try:
                     detail_window.setAttribute(detail_window.WA_TranslucentBackground, False)
                 except Exception:
@@ -988,6 +1073,26 @@ class MainController(QObject):
             self._active_timer_seconds = total_seconds
             self._update_widget_display()
 
+    def _get_open_dialog_windows(self):
+        """Get list of currently open dialog windows."""
+        windows = []
+        try:
+            # Add any open detail windows
+            windows.extend(self.open_detail_windows.values())
+            # Add tracked dialog windows
+            windows.extend(self._open_dialog_windows)
+        except Exception:
+            pass
+        return windows
+
+    def _on_dialog_window_closed(self, dialog_window):
+        """Remove a dialog window from tracking when it's closed."""
+        try:
+            if dialog_window in self._open_dialog_windows:
+                self._open_dialog_windows.remove(dialog_window)
+        except Exception as e:
+            self._logger.error(f"Error removing dialog window from tracking: {e}")
+
     def _on_detail_window_closed(self, jira_key: str):
         """Removes the detail window from the tracking dictionary when it's closed."""
         if jira_key in self.open_detail_windows:
@@ -1131,6 +1236,12 @@ class MainController(QObject):
         self.mini_widget_controller.hide()
         self.view.setWindowState(Qt.WindowState.WindowNoState)
         self.view.activateWindow()
+        # After restoring main, ensure any dialog windows do not keep an always-on-top
+        # hint that would prevent the main window from appearing above them.
+        try:
+            self._on_main_activated()
+        except Exception:
+            pass
 
     def _start_timer_from_widget(self, jira_key: str):
         """Starts a timer for a favorite issue selected from the widget."""
@@ -1206,6 +1317,94 @@ class MainController(QObject):
             self.mini_widget_controller.update_display(self._active_timer_key, time_str)
         else:
             self.mini_widget_controller.update_display(None, "00:00:00")
+
+    def eventFilter(self, watched, event):
+        """Intercept window activation events on the main view so we can lower dialogs
+        that were temporarily given WindowStaysOnTopHint. This helps when the user
+        explicitly activates the main window (clicking its taskbar entry, etc.)."""
+        try:
+            if watched is self.view and event.type() == QEvent.Type.WindowActivate:
+                try:
+                    self._on_main_activated()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Continue normal event processing
+        return super().eventFilter(watched, event)
+
+    def _on_main_activated(self):
+        """Bring main to front and ensure dialogs remain open when main is activated.
+        
+        When the main window is activated (clicked), we ensure it comes to the front
+        without closing any other dialogs. We also make sure dialogs don't have 
+        WindowStaysOnTopHint which would prevent main from appearing above them.
+
+        Contract:
+        - Inputs: none (uses self.view and tracked dialog lists)
+        - Outputs: main window raised/activated; dialogs remain open and visible
+        - Error modes: best-effort (exceptions are caught and logged)
+        """
+        try:
+            # First ensure all dialog windows remain visible and non-modal
+            # This is critical to prevent them from being closed when main is activated
+            try:
+                from PyQt6.QtCore import Qt
+                for win in self._get_open_dialog_windows():
+                    try:
+                        # Make dialog non-modal if it isn't already
+                        try:
+                            win.setModal(False)
+                        except Exception:
+                            pass
+                            
+                        # Remove WindowStaysOnTopHint but don't recreate the window
+                        # This allows main to appear above when needed
+                        try:
+                            win.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+                        except Exception:
+                            try:
+                                # Fallback to bitwise operation only if setWindowFlag isn't available
+                                # BUT IMPORTANTLY: we split the operation to ensure visibility is preserved
+                                flags = win.windowFlags()
+                                if bool(flags & Qt.WindowType.WindowStaysOnTopHint):
+                                    # Only if the flag is actually set, change it
+                                    flags = flags & ~Qt.WindowType.WindowStaysOnTopHint
+                                    # Remember the visibility state
+                                    was_visible = win.isVisible()
+                                    win.setWindowFlags(flags)
+                                    # Restore visibility if it was changed
+                                    if was_visible and not win.isVisible():
+                                        win.show()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            except Exception:
+                logger.exception('Error preparing dialog windows')
+                pass
+
+            # Now raise the main window
+            from services.ui_utils import apply_always_on_top
+            try:
+                apply_always_on_top(self.view, self.app_settings, raise_window=True)
+            except Exception:
+                pass
+
+            # Allow the window system to process these changes immediately
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
+                
+            # Log successful operation at debug level
+            try:
+                logger.debug("Main window activated and raised; %d dialog(s) remain open", 
+                            len(self._get_open_dialog_windows()))
+            except Exception:
+                pass
+        except Exception:
+            logger.exception('Error while bringing main to front')
             
     def _update_sync_status(self):
         """Updates the sync status indicator with current counts."""
@@ -1244,32 +1443,76 @@ class MainController(QObject):
         
     def _show_sync_queue_dialog(self):
         """Shows the sync queue management dialog."""
-        sync_queue_controller = SyncQueueController(self.db_service, self.jira_service, parent=self.view)
-        sync_queue_controller.sync_operation_changed.connect(self._update_sync_status)
-        sync_queue_controller.run()
+        try:
+            sync_queue_controller = SyncQueueController(self.db_service, self.jira_service, parent=None)
+            
+            # Ensure dialog is top-level, non-modal, and will not be closed when main is activated
+            try:
+                sync_queue_controller.view.setWindowFlag(Qt.WindowType.Window, True)
+                sync_queue_controller.view.setModal(False)
+            except Exception:
+                pass
+                
+            sync_queue_controller.sync_operation_changed.connect(self._update_sync_status)
+            
+            # Track the dialog window
+            self._open_dialog_windows.append(sync_queue_controller.view)
+            sync_queue_controller.view.destroyed.connect(lambda: self._on_dialog_window_closed(sync_queue_controller.view))
+            
+            # Show the view now
+            sync_queue_controller.view.show()
+            sync_queue_controller.view.raise_()
+            sync_queue_controller.view.activateWindow()
+            
+            # Finish controller setup (might do other initialization)
+            sync_queue_controller.run()
+            
+        except Exception as e:
+            self._logger.error(f"Error opening sync queue dialog: {e}")
+            import traceback
+            self._logger.error(traceback.format_exc())
             
     def _show_notifications_dialog(self):
         """Shows the notifications dialog."""
-        from views.notifications_dialog import NotificationsDialog
-        
-        notifications_dialog = NotificationsDialog(
-            self.notification_controller,
-            self.jira_service,
-            self.view
-        )
-        
-        # Load notification colors from settings
-        if hasattr(self, 'app_settings'):
-            notifications_dialog.load_notification_colors(self.app_settings)
-        
-        # Connect signal to open issue detail
-        notifications_dialog.open_issue_detail.connect(self._open_issue_from_history)
-        
-        # Mark notifications as read when dialog is closed
-        notifications_dialog.accepted.connect(self.notification_controller.mark_all_as_read)
-        
-        # Open the dialog
-        notifications_dialog.exec()
+        try:
+            from views.notifications_dialog import NotificationsDialog
+            
+            notifications_dialog = NotificationsDialog(
+                self.notification_controller,
+                self.jira_service,
+                parent=None  # No parent for top-level
+            )
+            
+            # Ensure dialog is top-level, non-modal, and will not be closed when main is activated
+            try:
+                notifications_dialog.setWindowFlag(Qt.WindowType.Window, True)
+                notifications_dialog.setModal(False)
+            except Exception:
+                pass
+            
+            # Track the dialog window
+            self._open_dialog_windows.append(notifications_dialog)
+            notifications_dialog.destroyed.connect(lambda: self._on_dialog_window_closed(notifications_dialog))
+            
+            # Load notification colors from settings
+            if hasattr(self, 'app_settings'):
+                notifications_dialog.load_notification_colors(self.app_settings)
+            
+            # Connect signal to open issue detail
+            notifications_dialog.open_issue_detail.connect(self._open_issue_from_history)
+            
+            # Mark notifications as read when dialog is closed
+            notifications_dialog.accepted.connect(self.notification_controller.mark_all_as_read)
+            
+            # Show the dialog now
+            notifications_dialog.show()
+            notifications_dialog.raise_()
+            notifications_dialog.activateWindow()
+            
+        except Exception as e:
+            self._logger.error(f"Error opening notifications dialog: {e}")
+            import traceback
+            self._logger.error(traceback.format_exc())
 
     def _open_issue_from_history(self, jira_key: str):
         """Opens a detail view for an issue selected from history."""

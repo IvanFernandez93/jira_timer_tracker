@@ -1717,6 +1717,9 @@ class JiraDetailController(QObject):
             if self.view.issue_links_tree.topLevelItemCount() > 0:
                 self.view.issue_links_tree.topLevelItem(0).setExpanded(True)
             
+            # Update the auto-generated note with links information
+            self._update_auto_note_with_links(links_tree)
+            
         except Exception as e:
             print(f"Error building links tree: {e}")
             self._on_links_error("Errore nella costruzione dell'albero dei collegamenti")
@@ -1785,6 +1788,9 @@ class JiraDetailController(QObject):
             self._populate_attachments()
             self._start_async_links_loading()  # Start async loading of issue links
             
+            # Create or update auto-generated note with issue details
+            self._create_or_update_auto_note()
+            
         except Exception as e:
             print(f"Error populating issue data: {e}")
             self.view.details_browser.setText(f"<b>Error populating issue data:</b><br>{e}")
@@ -1833,5 +1839,144 @@ class JiraDetailController(QObject):
         minutes = (total_seconds % 3600) // 60
         seconds = total_seconds % 60
         return f"{hours:02}:{minutes:02}:{seconds:02}"
+
+    def _create_or_update_auto_note(self):
+        """Create or update the auto-generated note with issue details."""
+        if not self._issue_data:
+            return
+            
+        auto_note_title = "Auto: Issue Details"
+        fields = self._issue_data.get('fields', {})
+        
+        # Build the note content
+        content_lines = []
+        content_lines.append(f"# {fields.get('summary', 'No Summary')}")
+        content_lines.append("")
+        content_lines.append("## Issue Information")
+        content_lines.append(f"- **Key**: {self.jira_key}")
+        content_lines.append(f"- **Type**: {fields.get('issuetype', {}).get('name', 'N/A')}")
+        content_lines.append(f"- **Status**: {fields.get('status', {}).get('name', 'N/A')}")
+        content_lines.append(f"- **Priority**: {fields.get('priority', {}).get('name', 'N/A')}")
+        content_lines.append(f"- **Assignee**: {fields.get('assignee', {}).get('displayName', 'Unassigned')}")
+        
+        # Add reporter if available
+        reporter = fields.get('reporter', {}).get('displayName')
+        if reporter:
+            content_lines.append(f"- **Reporter**: {reporter}")
+        
+        # Add created/updated dates if available
+        created = fields.get('created')
+        if created:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+                content_lines.append(f"- **Created**: {dt.strftime('%d %b %Y at %H:%M')}")
+            except:
+                pass
+                
+        updated = fields.get('updated')
+        if updated:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(updated.replace('Z', '+00:00'))
+                content_lines.append(f"- **Updated**: {dt.strftime('%d %b %Y at %H:%M')}")
+            except:
+                pass
+        
+        content_lines.append("")
+        content_lines.append("## Description")
+        description = fields.get('description', 'No description.')
+        if description:
+            # Convert Jira markup to basic markdown
+            description_md = description.replace('{code}', '```').replace('{code}', '```')
+            content_lines.append(description_md)
+        else:
+            content_lines.append("No description available.")
+        
+        content_lines.append("")
+        content_lines.append("## Links")
+        content_lines.append("*Loading issue links...*")
+        
+        content = "\n".join(content_lines)
+        
+        # Check if auto note already exists
+        existing_notes = self.db_service.get_notes_by_jira_key(self.jira_key)
+        auto_note_exists = any(note['title'] == auto_note_title for note in existing_notes)
+        
+        if auto_note_exists:
+            # Update existing auto note
+            for note in existing_notes:
+                if note['title'] == auto_note_title:
+                    self.db_service.update_note(note['id'], content=content)
+                    break
+        else:
+            # Create new auto note
+            self.db_service.create_note(
+                jira_key=self.jira_key,
+                title=auto_note_title,
+                content=content,
+                tags="auto-generated,issue-details"
+            )
+    
+    def _update_auto_note_with_links(self, links_tree):
+        """Update the auto-generated note with links information."""
+        auto_note_title = "Auto: Issue Details"
+        existing_notes = self.db_service.get_notes_by_jira_key(self.jira_key)
+        
+        # Find the auto note
+        auto_note = None
+        for note in existing_notes:
+            if note['title'] == auto_note_title:
+                auto_note = note
+                break
+        
+        if not auto_note:
+            return
+            
+        # Build links section
+        links_lines = []
+        if links_tree:
+            for root_data in links_tree:
+                children = root_data.get('children', [])
+                if children:
+                    links_lines.append("")
+                    links_lines.append("### Issue Links")
+                    for child in children:
+                        link_type = child.get('link_type', 'links to')
+                        direction = child.get('direction', 'outward')
+                        key = child.get('key', 'Unknown')
+                        summary = child.get('summary', 'No summary')
+                        status = child.get('status', 'Unknown')
+                        
+                        # Format based on direction
+                        if direction == 'outward':
+                            links_lines.append(f"- **{link_type}** [{key}]({summary}) - {status}")
+                        elif direction == 'inward':
+                            links_lines.append(f"- **{link_type}** [{key}]({summary}) - {status}")
+                        else:
+                            links_lines.append(f"- [{key}]({summary}) - {status}")
+                else:
+                    links_lines.append("")
+                    links_lines.append("*No linked issues found.*")
+        else:
+            links_lines.append("")
+            links_lines.append("*No linked issues found.*")
+        
+        links_content = "\n".join(links_lines)
+        
+        # Update the note content by replacing the links section
+        current_content = auto_note['content']
+        # Find and replace the "## Links" section
+        import re
+        links_pattern = r"(## Links\n).*?(\n\n##|\n*$)"
+        replacement = r"\1" + links_content + r"\2"
+        
+        # If no next section, just append
+        if "## Links" in current_content:
+            new_content = re.sub(links_pattern, replacement, current_content, flags=re.DOTALL)
+        else:
+            new_content = current_content + links_content
+        
+        self.db_service.update_note(auto_note['id'], content=new_content)
 
 

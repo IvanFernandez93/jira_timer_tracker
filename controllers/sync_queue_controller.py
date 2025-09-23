@@ -31,7 +31,7 @@ class SyncQueueController(QObject):
     def run(self):
         """Loads data and shows the dialog."""
         self._load_data()
-        return self.view.exec()
+        self.view.show()
         
     def _load_data(self):
         """Loads the sync queue data from the database."""

@@ -36,6 +36,30 @@ def apply_always_on_top(window, app_settings=None, raise_window: bool = True):
         from PyQt6.QtCore import Qt
 
         try:
+            # Prefer the non-destructive API setWindowFlag which toggles a single
+            # window hint without replacing the entire flags bitmask. This avoids
+            # widget recreation on some platforms/toolkits which can appear as the
+            # window being closed and reopened.
+            try:
+                window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, bool(enabled))
+                # Refresh only if needed
+                if not window.isVisible():
+                    try:
+                        window.show()
+                    except Exception:
+                        pass
+                if enabled and raise_window:
+                    try:
+                        window.raise_()
+                        window.activateWindow()
+                    except Exception:
+                        pass
+                return
+            except Exception:
+                # Fall back to old behavior if setWindowFlag is not available or fails
+                pass
+
+            # Fallback: manipulate full flags bitmask (existing behavior)
             flags = window.windowFlags()
             if enabled:
                 flags = flags | Qt.WindowType.WindowStaysOnTopHint
@@ -46,16 +70,8 @@ def apply_always_on_top(window, app_settings=None, raise_window: bool = True):
             # Apply flags and refresh safely
             window.setWindowFlags(flags)
             try:
-                # Only call show() if the window is not already visible. Calling
-                # show() while already visible can re-trigger showEvent handlers
-                # and cause reentrancy loops in some UI code.
                 if not window.isVisible():
                     window.show()
-
-                # Optionally raise/activate the window. Some callers (for example
-                # when showing a detail window while the main window is always-on-top)
-                # want to reapply the flags without forcing a raise here. Use the
-                # raise_window parameter to control that behaviour.
                 if enabled and raise_window:
                     try:
                         window.raise_()
