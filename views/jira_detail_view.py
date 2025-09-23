@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
                              QTabWidget, QTextEdit, QListWidget, QTextBrowser, QSplitter,
                              QTabBar, QScrollArea, QProgressBar, QFrame, QDialog, QGridLayout,
-                             QSizePolicy, QToolButton)
+                             QSizePolicy, QToolButton, QComboBox)
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QKeySequence
 # QShortcut may be provided under QtWidgets or QtGui depending on PyQt6 build
@@ -72,12 +72,33 @@ class JiraDetailView(QDialog):
             'QPushButton:checked { background-color: #dff0d8; border-color:#b2d8a7 }'
         )
         
+        # Add priority selection
+        self.priority_label = QLabel("Priority:")
+        self.priority_combo = QComboBox()
+        self.priority_combo.setMinimumWidth(120)
+        self.priority_combo.setToolTip("Change the issue priority")
+        
+        # Priority config button
+        self.priority_config_btn = QPushButton("⚙️")
+        self.priority_config_btn.setToolTip("Configure priorities")
+        self.priority_config_btn.setFixedSize(28, 28)
+        
+        # Create a layout for the priority controls
+        priority_layout = QHBoxLayout()
+        priority_layout.addWidget(self.priority_label)
+        priority_layout.addWidget(self.priority_combo)
+        priority_layout.addWidget(self.priority_config_btn)
+        priority_layout.setSpacing(4)
+        
         self.timer_label = QLabel("00:00:00")
         self.timer_label.setFont(QFont("Segoe UI", 48, QFont.Weight.Bold))
         self.timer_label.setAlignment(Qt.AlignmentFlag.AlignRight)
 
         header_layout.addWidget(self.jira_key_label)
         header_layout.addWidget(self.notification_btn)
+        
+        # Add priority controls to header
+        header_layout.addLayout(priority_layout)
         header_layout.addStretch()
         header_layout.addWidget(self.timer_label)
         main_layout.addLayout(header_layout)

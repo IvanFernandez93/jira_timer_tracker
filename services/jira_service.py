@@ -82,6 +82,42 @@ class JiraService:
         """
         self.jira = None
         self._logger.info("Jira service set to offline state")
+        
+    def get_priorities(self) -> list:
+        """
+        Gets all available priorities from Jira.
+        Returns a list of priority dicts with 'id' and 'name'.
+        """
+        if not self.is_connected():
+            raise ConnectionError("Not connected to Jira.")
+            
+        try:
+            def _do_get_priorities():
+                priorities = self.jira.priorities()
+                return [{'id': p.id, 'name': p.name} for p in priorities]
+                
+            return self._with_retries(_do_get_priorities)
+        except Exception as e:
+            self._logger.error(f"Failed to get Jira priorities: {str(e)}")
+            return []
+            
+    def update_issue_priority(self, issue_key: str, priority_id: str) -> bool:
+        """
+        Updates the priority of a Jira issue.
+        Returns True if successful, False otherwise.
+        """
+        if not self.is_connected():
+            raise ConnectionError("Not connected to Jira.")
+            
+        try:
+            def _do_update_priority():
+                self.jira.issue(issue_key).update(fields={'priority': {'id': priority_id}})
+                return True
+                
+            return self._with_retries(_do_update_priority)
+        except Exception as e:
+            self._logger.error(f"Failed to update priority for {issue_key}: {str(e)}")
+            return False
 
     def search_issues(self, jql: str, start_at: int = 0, max_results: int = 100, issue_keys: list[str] | None = None) -> list:
         """

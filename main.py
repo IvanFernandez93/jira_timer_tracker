@@ -4,7 +4,7 @@ import os
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
-from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
+from PyQt6.QtWidgets import QApplication, QMessageBox, QDialog
 from PyQt6.QtCore import QSettings
 from qfluentwidgets import FluentTranslator, Theme, setTheme, isDarkTheme
 
@@ -44,8 +44,10 @@ def setup_logging(app_settings=None):
         if lvl:
             try:
                 log_level = getattr(logging, lvl.upper(), logging.ERROR)
+                print(f"Using explicit log level: {lvl.upper()}")
             except Exception:
                 log_level = logging.ERROR
+                print(f"Invalid log level: {lvl}, using ERROR")
 
         # Optional rotating handler settings
         try:
@@ -57,8 +59,21 @@ def setup_logging(app_settings=None):
         except Exception:
             backup_count = backup_count
 
-        # If explicit level not set, fallback to filters for individual levels
-        if not lvl:
+        # Determine if we should use filters based on individual level settings
+        log_info_enabled = app_settings.get_setting("log_info", "true").lower() == "true"
+        log_debug_enabled = app_settings.get_setting("log_debug", "false").lower() == "true"
+        log_warning_enabled = app_settings.get_setting("log_warning", "true").lower() == "true"
+        
+        # If explicit level not set or we need finer control with filters
+        if not lvl or (log_level > logging.DEBUG and log_debug_enabled):
+            # If DEBUG logs are enabled but level is higher, we need to lower the level
+            if log_debug_enabled:
+                log_level = logging.DEBUG
+            elif log_info_enabled:
+                log_level = min(log_level, logging.INFO)
+            elif log_warning_enabled:
+                log_level = min(log_level, logging.WARNING)
+                
             # Crea un filtro personalizzato basato sulle impostazioni
             class LogLevelFilter(logging.Filter):
                 def __init__(self, app_settings):
@@ -185,8 +200,7 @@ def main():
     db_service.initialize_db()
 
     app_settings = AppSettings(db_service)
-    # Forza il livello di log a DEBUG per debug temporaneo
-    app_settings.set_setting('log_level', 'DEBUG')
+    # Non forzare il livello di log, usa le impostazioni salvate
     cred_service = CredentialService()
 
     # Read retry/log configuration from settings (with sensible defaults)

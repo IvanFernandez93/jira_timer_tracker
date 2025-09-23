@@ -23,6 +23,7 @@ class JiraGridView(QWidget):
             {"id": "key", "label": "Key", "visible": True, "sortable": True},
             {"id": "title", "label": "Title", "visible": True, "sortable": True},
             {"id": "status", "label": "Status", "visible": True, "sortable": True},
+            {"id": "priority", "label": "Priorità", "visible": True, "sortable": True},
             {"id": "time_spent", "label": "Time Spent", "visible": True, "sortable": True},
             {"id": "favorite", "label": "Favorite", "visible": True, "sortable": False},
         ]
@@ -41,9 +42,10 @@ class JiraGridView(QWidget):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # Key column auto-resize
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)  # Title column stretches
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Status column auto-resize
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Time column auto-resize
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)  # Favorite column fixed
-        self.table.setColumnWidth(4, 60)  # Fixed width for favorite column
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Priority column auto-resize
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # Time column auto-resize
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)  # Favorite column fixed
+        self.table.setColumnWidth(5, 60)  # Fixed width for favorite column
         
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -256,7 +258,7 @@ class JiraGridView(QWidget):
     def add_issue_row(self, row_data):
         """
         Adds a new row to the table.
-        `row_data` should be a dictionary with keys: 'key', 'title', 'status', 'time_spent'.
+        `row_data` should be a dictionary with keys: 'key', 'title', 'status', 'priority', 'time_spent'.
         """
         # Insert row and populate columns according to visible columns config
         row_position = self.table.rowCount()
@@ -394,81 +396,81 @@ class JiraGridView(QWidget):
         """Apply cumulative sorting to the table."""
         if not self.sort_columns:
             return
-            
-        # Identify favorite column index (typically 4, but could be different)
-        favorite_col_index = -1
-        for i, col in enumerate(self.get_visible_columns()):
-            if col.get('id') == 'favorite':
-                favorite_col_index = i
-                break
-                
-        if favorite_col_index == -1:
-            # Fallback if favorite column not found
-            favorite_col_index = self.table.columnCount() - 1
-            
-        # Get all table data
-        table_data = []
-        for row in range(self.table.rowCount()):
-            row_data = []
-            # Get data from all columns except the favorite column
-            for col in range(self.table.columnCount()):
-                if col != favorite_col_index:
-                    item = self.table.item(row, col)
-                    row_data.append(item.text() if item else "")
-                else:
-                    # For the favorite column, store the widget itself
-                    widget = self.table.cellWidget(row, col)
-                    # Also store the column index for later
-                    row_data.append((widget, col))
-            table_data.append(row_data)
-        
-        # Sort data using multiple criteria
-        def sort_key(row_data):
-            key = []
-            for sort_info in reversed(self.sort_columns):  # Process in reverse order for stable sort
-                col_index = sort_info['column']
-                # Skip the favorite column index
-                if col_index == favorite_col_index:
-                    continue
-                    
-                # Adjust index if needed
-                adjusted_index = col_index
-                if col_index > favorite_col_index:
-                    adjusted_index = col_index - 1
-                    
-                if adjusted_index < len(row_data) - 1:  # -1 for the favorite widget tuple
-                    value = row_data[adjusted_index]
-                    
-                    # Handle numeric sorting for time column
-                    # Get the column ID for this index
-                    visible_columns = self.get_visible_columns()
-                    is_time_column = False
-                    
-                    # Safely check if this is the time_spent column
-                    if 0 <= col_index < len(visible_columns):
-                        is_time_column = visible_columns[col_index].get('id') == 'time_spent'
-                    
-                    if is_time_column:
-                        try:
-                            # Extract hours and minutes
-                            if isinstance(value, str) and 'h' in value and 'm' in value:
-                                parts = value.replace('h', '').replace('m', '').split()
-                                hours = int(parts[0]) if len(parts) > 0 else 0
-                                minutes = int(parts[1]) if len(parts) > 1 else 0
-                                numeric_value = hours * 60 + minutes
-                            else:
-                                numeric_value = 0
-                            key.append((numeric_value, sort_info['order'] == Qt.SortOrder.DescendingOrder))
-                        except Exception:
-                            key.append((0, sort_info['order'] == Qt.SortOrder.DescendingOrder))
-                    else:
-                        # String sorting
-                        key.append((str(value).lower(), sort_info['order'] == Qt.SortOrder.DescendingOrder))
-            return key
         
         try:
+            # Identify favorite column index
+            favorite_col_index = -1
+            visible_columns = self.get_visible_columns()
+            for i, col in enumerate(visible_columns):
+                if col.get('id') == 'favorite':
+                    favorite_col_index = i
+                    break
+                    
+            # Collect all row data including favorite state
+            data_to_sort = []
+            for row in range(self.table.rowCount()):
+                row_data = {'values': [], 'favorite_checked': False, 'favorite_widget': None}
+                
+                # Get text from all columns
+                for col in range(self.table.columnCount()):
+                    if col != favorite_col_index:
+                        item = self.table.item(row, col)
+                        row_data['values'].append(item.text() if item else "")
+                    else:
+                        # For favorite column, get the widget state but store text as placeholder
+                        widget = self.table.cellWidget(row, col)
+                        if widget:
+                            row_data['favorite_checked'] = widget.isChecked()
+                            row_data['favorite_widget'] = widget
+                            row_data['values'].append("★" if widget.isChecked() else "☆")
+                        else:
+                            row_data['values'].append("☆")
+                            
+                data_to_sort.append(row_data)
+            
+            # Define sort key function
+            def sort_key(row_data):
+                key = []
+                for sort_info in reversed(self.sort_columns):  # Process in reverse order for stable sort
+                    col_index = sort_info['column']
+                    # Skip favorite column from custom sorting
+                    if col_index == favorite_col_index:
+                        continue
+                        
+                    if 0 <= col_index < len(row_data['values']):
+                        value = row_data['values'][col_index]
+                        
+                        # Handle time spent column specially
+                        is_time_column = False
+                        if 0 <= col_index < len(visible_columns):
+                            is_time_column = visible_columns[col_index].get('id') == 'time_spent'
+                        
+                        if is_time_column and isinstance(value, str):
+                            try:
+                                # Extract hours and minutes
+                                if 'h' in value and 'm' in value:
+                                    parts = value.replace('h', '').replace('m', '').split()
+                                    hours = int(parts[0]) if len(parts) > 0 else 0
+                                    minutes = int(parts[1]) if len(parts) > 1 else 0
+                                    numeric_value = hours * 60 + minutes
+                                else:
+                                    numeric_value = 0
+                                key.append((numeric_value, sort_info['order'] == Qt.SortOrder.DescendingOrder))
+                            except Exception:
+                                key.append((0, sort_info['order'] == Qt.SortOrder.DescendingOrder))
+                        else:
+                            # String sorting
+                            key.append((str(value).lower(), sort_info['order'] == Qt.SortOrder.DescendingOrder))
+                return key
+            
             # Sort the data
-            sorted_data = sorted(table_data, key=sort_key, reverse=False)
+            sorted_data = sorted(data_to_sort, key=sort_key)
+            
+            # Remember scroll position
+            vscroll = self.table.verticalScrollBar().value()
+            
+            # Temporarily block signals to prevent cell widget signals during rebuild
+            self.table.blockSignals(True)
             
             # Clear table and repopulate with sorted data
             self.table.setRowCount(0)
@@ -476,25 +478,31 @@ class JiraGridView(QWidget):
                 row_position = self.table.rowCount()
                 self.table.insertRow(row_position)
                 
-                # Extract favorite widget and its column index
-                favorite_widget_info = None
-                for i, item in enumerate(row_data):
-                    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], int):
-                        favorite_widget_info = item
-                        break
-                
-                # Add text items and skip the favorite widget tuple
-                col_offset = 0
-                for i, item in enumerate(row_data):
-                    if not isinstance(item, tuple) or len(item) != 2 or not isinstance(item[1], int):
-                        self.table.setItem(row_position, i + col_offset, QTableWidgetItem(str(item)))
-                    else:
-                        # Adjust offset when we skip the favorite widget tuple
-                        col_offset = -1
-                
-                # Add favorite widget if we have it
-                if favorite_widget_info and favorite_widget_info[0]:
-                    self.table.setCellWidget(row_position, favorite_widget_info[1], favorite_widget_info[0])
+                # Add all items back to table
+                for col, value in enumerate(row_data['values']):
+                    if col != favorite_col_index:
+                        self.table.setItem(row_position, col, QTableWidgetItem(value))
+                        
+                # Handle favorite column separately
+                if favorite_col_index >= 0:
+                    from qfluentwidgets import TransparentToolButton
+                    favorite_widget = row_data.get('favorite_widget')
+                    
+                    # Create a new widget if we don't have the original
+                    if not favorite_widget:
+                        favorite_widget = TransparentToolButton("★" if row_data['favorite_checked'] else "☆")
+                        favorite_widget.setCheckable(True)
+                        favorite_widget.setChecked(row_data['favorite_checked'])
+                        favorite_widget.setToolTip("Aggiungi/rimuovi dai preferiti")
+                    
+                    self.table.setCellWidget(row_position, favorite_col_index, favorite_widget)
+            
+            # Re-enable signals
+            self.table.blockSignals(False)
+            
+            # Restore scroll position
+            self.table.verticalScrollBar().setValue(vscroll)
+            
         except Exception as e:
             import traceback
             print(f"Error in _apply_cumulative_sort: {e}")

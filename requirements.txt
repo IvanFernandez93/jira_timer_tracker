@@ -1,6 +1,18 @@
-PyQt6 # Or PySide6, as per requirements. I'll use PyQt6 as the primary example.
-jira
-markdown
-keyring
-pytz  # For timezone handling
-python-dateutil  # For advanced date parsing
+# Core dependencies
+PyQt6>=6.5.0
+jira>=3.5.0
+markdown>=3.4.0
+keyring>=24.0.0
+pytz>=2023.3
+python-dateutil>=2.8.2
+requests>=2.30.0
+pillow>=10.0.0
+cryptography>=41.0.0
+
+# Optional dependencies
+pywin32>=306; sys_platform == 'win32'  # Windows-specific features
+pyqt6-fluent-widgets>=1.0.0  # Optional UI enhancements
+
+# Development dependencies (not required for regular use)
+# pytest>=7.4.0
+# pytest-qt>=4.2.0

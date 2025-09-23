@@ -391,6 +391,7 @@ class JiraDetailController(QObject):
         self.jira_service = jira_service
         self.db_service = db_service
         self.jira_key = jira_key
+        self.priority_controller = None
 
         self._issue_data = None
         self._attachments_data = []
@@ -425,6 +426,10 @@ class JiraDetailController(QObject):
         
         # Notification button
         self.view.notification_btn.clicked.connect(self._toggle_notification_subscription)
+        
+        # Priority controls
+        self.view.priority_combo.currentIndexChanged.connect(self._update_issue_priority)
+        self.view.priority_config_btn.clicked.connect(self._show_priority_config)
         
         # Comment signals
         self.view.add_comment_btn.clicked.connect(self._add_comment)
@@ -1807,12 +1812,36 @@ class JiraDetailController(QObject):
             self._populate_attachments()
             self._start_async_links_loading()  # Start async loading of issue links
             
+            # Set the current priority in the combo box
+            self._update_priority_combo_from_issue_data()
+            
             # Create or update auto-generated note with issue details
             self._create_or_update_auto_note()
             
         except Exception as e:
             print(f"Error populating issue data: {e}")
             self.view.details_browser.setText(f"<b>Error populating issue data:</b><br>{e}")
+    
+    def _update_priority_combo_from_issue_data(self):
+        """Update the priority combo box based on current issue data."""
+        if not self._issue_data:
+            return
+            
+        try:
+            # Get the current priority from the issue data
+            priority_id = self._issue_data.get('fields', {}).get('priority', {}).get('id')
+            if not priority_id:
+                return
+                
+            # Find and select the matching priority in the combo box
+            for i in range(self.view.priority_combo.count()):
+                if self.view.priority_combo.itemData(i) == priority_id:
+                    self.view.priority_combo.blockSignals(True)  # Prevent triggering the changed signal
+                    self.view.priority_combo.setCurrentIndex(i)
+                    self.view.priority_combo.blockSignals(False)
+                    break
+        except Exception as e:
+            print(f"Error updating priority combo: {e}")
     
     @pyqtSlot(str)
     def _on_issue_error(self, error_message):
@@ -1980,6 +2009,133 @@ class JiraDetailController(QObject):
                 content=content,
                 tags="auto-generated,issue-details"
             )
+    
+    def populate_priority_combo(self, priorities=None):
+        """Populate the priority dropdown with available priorities."""
+        # Clear existing items
+        self.view.priority_combo.clear()
+        
+        if not priorities:
+            # If no priorities provided, get them from the Jira service
+            try:
+                if self.jira_service and self.jira_service.is_connected():
+                    priorities = self.jira_service.get_priorities()
+                else:
+                    # Default priorities when offline
+                    priorities = [
+                        {"id": "1", "name": "Highest"},
+                        {"id": "2", "name": "High"},
+                        {"id": "3", "name": "Medium"},
+                        {"id": "4", "name": "Low"},
+                        {"id": "5", "name": "Lowest"}
+                    ]
+            except Exception as e:
+                print(f"Error getting priorities: {e}")
+                priorities = []
+        
+        # Add priorities to combo box
+        for priority in priorities:
+            self.view.priority_combo.addItem(priority.get("name", ""), priority.get("id", ""))
+        
+        # Set current priority if issue data is loaded
+        if self._issue_data:
+            current_priority = self._issue_data.get("fields", {}).get("priority", {})
+            current_id = current_priority.get("id", "")
+            
+            # Find index with this id
+            for i in range(self.view.priority_combo.count()):
+                if self.view.priority_combo.itemData(i) == current_id:
+                    self.view.priority_combo.setCurrentIndex(i)
+                    break
+    
+    def _update_issue_priority(self):
+        """Update the priority of the issue."""
+        if not self.view.priority_combo.currentData():
+            return
+            
+        new_priority_id = self.view.priority_combo.currentData()
+        new_priority_name = self.view.priority_combo.currentText()
+        
+        # Get priority configuration controller
+        from controllers.priority_config_controller import PriorityConfigController
+        priority_controller = PriorityConfigController(self.db_service, self.jira_service)
+        
+        # Update priority
+        success = priority_controller.update_priority(self.jira_key, new_priority_id)
+        if success:
+            # Update local issue data
+            if self._issue_data and "fields" in self._issue_data:
+                self._issue_data["fields"]["priority"] = {
+                    "id": new_priority_id,
+                    "name": new_priority_name
+                }
+    
+    def _show_priority_config(self):
+        """Show the priority configuration dialog."""
+        from controllers.priority_config_controller import PriorityConfigController
+        priority_controller = PriorityConfigController(self.db_service, self.jira_service)
+        
+        # Open priority configuration dialog
+        priority_controller.open_priority_config_dialog(parent=self.view)
+        
+        # After config dialog is closed, refresh priorities
+        self.populate_priority_combo()
+    
+    def populate_priority_combo(self, priorities=None):
+        """Populate the priority combo box with available priorities from Jira."""
+        if not priorities:
+            # If not provided, try to get them from the priority controller
+            if hasattr(self, 'priority_controller') and self.priority_controller:
+                priorities = self.priority_controller.get_available_priorities()
+            else:
+                # Default priorities if no controller available
+                priorities = [
+                    {"id": "1", "name": "Highest"},
+                    {"id": "2", "name": "High"},
+                    {"id": "3", "name": "Medium"},
+                    {"id": "4", "name": "Low"},
+                    {"id": "5", "name": "Lowest"}
+                ]
+        
+        # Clear existing items
+        self.view.priority_combo.clear()
+        
+        # Add priorities to the combo box
+        for priority in priorities:
+            self.view.priority_combo.addItem(priority.get("name", "Unknown"), priority.get("id"))
+    
+    def _update_issue_priority(self, index):
+        """Handle priority selection change."""
+        if index < 0:
+            return
+            
+        priority_id = self.view.priority_combo.itemData(index)
+        priority_name = self.view.priority_combo.itemText(index)
+        
+        if not priority_id:
+            return
+            
+        # Get or create priority controller if needed
+        if not self.priority_controller:
+            from controllers.priority_config_controller import PriorityConfigController
+            self.priority_controller = PriorityConfigController(self.db_service, self.jira_service)
+        
+        # Update priority
+        self.priority_controller.update_priority(self.jira_key, priority_id)
+    
+    def _show_priority_config(self):
+        """Show the priority configuration dialog."""
+        # Get or create priority controller if needed
+        if not self.priority_controller:
+            from controllers.priority_config_controller import PriorityConfigController
+            self.priority_controller = PriorityConfigController(self.db_service, self.jira_service)
+        
+        # Open the configuration dialog
+        self.priority_controller.open_priority_config_dialog(self.view)
+        
+        # Refresh the priority combo box after configuration
+        priorities = self.priority_controller.get_available_priorities()
+        self.populate_priority_combo(priorities)
     
     def _update_auto_note_with_links(self, links_tree):
         """Update the auto-generated note with links information."""

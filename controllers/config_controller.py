@@ -143,6 +143,16 @@ class ConfigController:
             self.app_settings.set_setting("log_info", str(log_info).lower())
             self.app_settings.set_setting("log_debug", str(log_debug).lower())
             self.app_settings.set_setting("log_warning", str(log_warning).lower())
+            
+            # Imposta anche il livello di log esplicito in base alle caselle selezionate
+            if log_debug:
+                self.app_settings.set_setting("log_level", "DEBUG")
+            elif log_info:
+                self.app_settings.set_setting("log_level", "INFO")
+            elif log_warning:
+                self.app_settings.set_setting("log_level", "WARNING")
+            else:
+                self.app_settings.set_setting("log_level", "ERROR")
             # Save always-on-top setting
             self.app_settings.set_setting("always_on_top", str(bool(always_on_top)).lower())
             

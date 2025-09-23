@@ -456,10 +456,15 @@ class MainController(QObject):
         # Get status for coloring
         status_name = issue_data.get('fields', {}).get('status', {}).get('name', '')
         
+        # Get priority information
+        priority_data = issue_data.get('fields', {}).get('priority', {})
+        priority_name = priority_data.get('name', '')
+        
         # Create items
         key_item = QTableWidgetItem(jira_key)
         title_item = QTableWidgetItem(issue_data.get('fields', {}).get('summary', ''))
         status_item = QTableWidgetItem(status_name)
+        priority_item = QTableWidgetItem(priority_name)
         time_item = QTableWidgetItem(time_str)
         
         # Apply status color if available
@@ -473,13 +478,15 @@ class MainController(QObject):
             key_item.setBackground(brush)
             title_item.setBackground(brush)
             status_item.setBackground(brush)
+            priority_item.setBackground(brush)
             time_item.setBackground(brush)
         
         # Add items to table
         table.setItem(row_position, 0, key_item)
         table.setItem(row_position, 1, title_item)
         table.setItem(row_position, 2, status_item)
-        table.setItem(row_position, 3, time_item)
+        table.setItem(row_position, 3, priority_item)
+        table.setItem(row_position, 4, time_item)
         
         # Favorite button logic
         from qfluentwidgets import TransparentToolButton
@@ -490,7 +497,7 @@ class MainController(QObject):
         fav_button.setChecked(is_fav)
         fav_button.setText("★" if is_fav else "☆")
         fav_button.clicked.connect(lambda _, key=jira_key, btn=fav_button: self._toggle_favorite(key, btn))
-        table.setCellWidget(row_position, 4, fav_button)
+        table.setCellWidget(row_position, 5, fav_button)
 
     def _toggle_favorite(self, jira_key: str, button: QPushButton):
         """Toggles the favorite status of an issue."""
@@ -1158,6 +1165,18 @@ class MainController(QObject):
         detail_controller.timer_started.connect(self._on_timer_started)
         detail_controller.timer_stopped.connect(self._on_timer_stopped)
         detail_controller.time_updated.connect(self._on_time_updated)
+
+        # Initialize priority combo box with available priorities
+        from controllers.priority_config_controller import PriorityConfigController
+        if not hasattr(self, 'priority_controller'):
+            self.priority_controller = PriorityConfigController(
+                self.db_service,
+                self.jira_service
+            )
+        
+        # Populate priorities in the detail view
+        priorities = self.priority_controller.get_available_priorities()
+        detail_controller.populate_priority_combo(priorities)
 
         # Adjust window flags for proper stacking
         self._adjust_window_flags_for_detail(detail_window)

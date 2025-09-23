@@ -1,7 +1,10 @@
+````markdown
 # Jira Time Tracker (desktop)
 
 Quick start
 -----------
+
+### Option 1: Full Installation
 
 1. Install requirements:
 
@@ -15,6 +18,30 @@ python -m pip install -r requirements-dev.txt
 ```powershell
 python main.py
 ```
+
+### Option 2: Using the Installation Script
+
+Run the installation script which will set up a virtual environment, install dependencies, and create shortcuts:
+
+```powershell
+.\install.ps1
+```
+
+### Option 3: Standalone Execution (No Installation)
+
+For running the app without installation, use one of the standalone scripts:
+
+- PowerShell version:
+```powershell
+.\run_standalone.ps1
+```
+
+- Batch version (for Command Prompt):
+```batch
+run_standalone.bat
+```
+
+These scripts will create a temporary virtual environment, install required dependencies, and run the application directly.
 
 3. Run tests:
 

@@ -62,6 +62,25 @@ class DatabaseService:
                     JiraKey TEXT PRIMARY KEY NOT NULL
                 );
             """)
+            # PriorityUpdates Table for local priority changes
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS PriorityUpdates (
+                    JiraKey TEXT PRIMARY KEY NOT NULL,
+                    PriorityId TEXT NOT NULL,
+                    PriorityName TEXT,
+                    UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    SyncStatus TEXT DEFAULT 'pending'
+                );
+            """)
+            
+            # PriorityConfig Table for priority customizations
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS PriorityConfig (
+                    PriorityId TEXT PRIMARY KEY,
+                    ColorCode TEXT NOT NULL,
+                    CustomLabel TEXT
+                );
+            """)
             # Annotations Table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS Annotations (
@@ -1310,6 +1329,27 @@ class DatabaseService:
                 WHERE JiraKey = ? AND AttachmentId = ?
             """, (jira_key, attachment_id))
             conn.commit()
+        finally:
+            conn.close()
+            
+    def store_priority_update(self, jira_key: str, priority_id: str, priority_name: str = None) -> bool:
+        """Store a priority update for later syncing with Jira."""
+        conn = self.get_connection()
+        if conn is None:
+            return False
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO PriorityUpdates
+                (JiraKey, PriorityId, PriorityName, UpdatedAt, SyncStatus)
+                VALUES (?, ?, ?, datetime('now'), 'pending')
+            """, (jira_key, priority_id, priority_name))
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"Database error storing priority update: {e}")
+            return False
         finally:
             conn.close()
             
