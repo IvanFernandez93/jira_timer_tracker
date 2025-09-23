@@ -43,7 +43,11 @@ class NotesLoaderWorker(QThread):
 
 class NotesGridDialog(QDialog):
     """Dialog for displaying all notes in a grid with Jira key, note title, and update date."""
-
+    
+    # Segnali per richiedere l'apertura del dettaglio o l'avvio del timer di un ticket Jira
+    open_jira_detail_requested = pyqtSignal(str)  # Emette la chiave Jira
+    start_timer_requested = pyqtSignal(str)  # Emette la chiave Jira per avviare il timer
+    
     def __init__(self, db_service, parent=None):
         super().__init__(parent)
         self.db_service = db_service
@@ -81,12 +85,13 @@ class NotesGridDialog(QDialog):
         self.main_layout.addLayout(self.search_layout)
 
         # Table section
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Jira Key", "Titolo Nota", "Data Aggiornamento"])
+        self.table = QTableWidget(0, 4)  # Aggiungiamo una colonna per il pulsante di dettaglio
+        self.table.setHorizontalHeaderLabels(["Jira Key", "Titolo Nota", "Data Aggiornamento", "Azioni"])
         self.table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # Jira Key
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)  # Title
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Date
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Actions
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -127,9 +132,7 @@ class NotesGridDialog(QDialog):
         loading_item = QTableWidgetItem("Caricamento note...")
         loading_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table.setItem(0, 0, loading_item)
-        self.table.setSpan(0, 0, 1, 3)  # Span across all columns
-        
-        # Cancel any existing loader
+        self.table.setSpan(0, 0, 1, 4)  # Span across all columns        # Cancel any existing loader
         if self.notes_loader_worker:
             self.notes_loader_worker.cancel()
             self.notes_loader_worker.wait()
@@ -166,17 +169,48 @@ class NotesGridDialog(QDialog):
                 title_item = QTableWidgetItem(title)
                 self.table.setItem(row_position, 1, title_item)
 
-                # Update Date (format it nicely)
+                # Update Date (format it nicely and convert from UTC to local time)
                 try:
                     from datetime import datetime
-                    # Parse the datetime string and format it
+                    
+                    # Parse the UTC datetime
                     dt = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
-                    formatted_date = dt.strftime("%d/%m/%Y %H:%M")
+                    
+                    # Convert to local time
+                    local_dt = dt.astimezone()  # Senza argomenti, astimezone converte al fuso orario locale
+                    
+                    # Format for display with local timezone
+                    formatted_date = local_dt.strftime("%d/%m/%Y %H:%M")
                 except Exception:
                     formatted_date = updated_at
 
                 date_item = QTableWidgetItem(formatted_date)
                 self.table.setItem(row_position, 2, date_item)
+                
+                # Action Buttons (Detail View and Start Timer)
+                from PyQt6.QtWidgets import QWidget, QPushButton, QHBoxLayout
+                action_cell_widget = QWidget()
+                action_layout = QHBoxLayout(action_cell_widget)
+                action_layout.setContentsMargins(4, 2, 4, 2)
+                action_layout.setSpacing(4)
+                
+                # Create detail button with icon
+                detail_btn = PushButton()
+                detail_btn.setIcon(FIF.LINK)
+                detail_btn.setToolTip(f"Apri dettaglio ticket {jira_key}")
+                detail_btn.setFixedSize(32, 32)
+                detail_btn.clicked.connect(lambda checked=False, key=jira_key: self._open_detail_view(key))
+                action_layout.addWidget(detail_btn)
+                
+                # Create timer button with icon
+                timer_btn = PushButton()
+                timer_btn.setIcon(FIF.CLOCK)
+                timer_btn.setToolTip(f"Avvia timer per {jira_key}")
+                timer_btn.setFixedSize(32, 32)
+                timer_btn.clicked.connect(lambda checked=False, key=jira_key: self._start_timer(key))
+                action_layout.addWidget(timer_btn)
+                
+                self.table.setCellWidget(row_position, 3, action_cell_widget)
 
             self.hide_status()
 
@@ -196,7 +230,7 @@ class NotesGridDialog(QDialog):
         error_item = QTableWidgetItem(f"Errore: {error_message}")
         error_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table.setItem(0, 0, error_item)
-        self.table.setSpan(0, 0, 1, 3)  # Span across all columns
+        self.table.setSpan(0, 0, 1, 4)  # Span across all columns
 
     def load_notes(self):
         """Start async loading of notes."""
@@ -230,6 +264,18 @@ class NotesGridDialog(QDialog):
         """Hides the status message."""
         self.status_label.setVisible(False)
 
+    def _open_detail_view(self, jira_key):
+        """Opens the detail view for the given Jira key."""
+        if jira_key:
+            # Emettiamo il segnale per richiedere l'apertura della vista di dettaglio
+            self.open_jira_detail_requested.emit(jira_key)
+            
+    def _start_timer(self, jira_key):
+        """Avvia il timer per la chiave Jira specificata."""
+        if jira_key:
+            # Emettiamo il segnale per richiedere l'avvio del timer
+            self.start_timer_requested.emit(jira_key)
+    
     def closeEvent(self, event):
         """Handle dialog closing by cancelling any active workers."""
         # Cancel notes loader if active

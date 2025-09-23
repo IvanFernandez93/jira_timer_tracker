@@ -207,6 +207,23 @@ class DatabaseService:
                     is_read INTEGER DEFAULT 1
                 );
             """)
+            
+            # FileAttachments Table - Tracks downloaded files
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS FileAttachments (
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    JiraKey TEXT NOT NULL,
+                    AttachmentId TEXT NOT NULL,
+                    FileName TEXT NOT NULL,
+                    FilePath TEXT NOT NULL,
+                    FileHash TEXT NOT NULL,
+                    FileSize INTEGER NOT NULL,
+                    MimeType TEXT,
+                    DownloadedAt DATETIME NOT NULL,
+                    LastCheckedAt DATETIME NOT NULL,
+                    UNIQUE(JiraKey, AttachmentId)
+                );
+            """)
             conn.commit()
             print("Database initialized successfully.")
         except sqlite3.Error as e:
@@ -328,8 +345,11 @@ class DatabaseService:
             if not updates:
                 return
             
-            # Always update UpdatedAt
-            updates.append('UpdatedAt = CURRENT_TIMESTAMP')
+            # Always update UpdatedAt with explicit timestamp in UTC format
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+            updates.append('UpdatedAt = ?')
+            params.append(current_time)
             
             # Add note_id to params
             params.append(note_id)
@@ -346,9 +366,14 @@ class DatabaseService:
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
+            
+            # Otteniamo il timestamp attuale con informazioni sul fuso orario
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+            
             cursor.execute(
-                'UPDATE Annotations SET IsDeleted = 1, DeletedAt = CURRENT_TIMESTAMP WHERE Id = ?',
-                (note_id,)
+                'UPDATE Annotations SET IsDeleted = 1, DeletedAt = ? WHERE Id = ?',
+                (current_time, note_id)
             )
             conn.commit()
         finally:
@@ -544,10 +569,15 @@ class DatabaseService:
             cursor = conn.cursor()
             cursor.execute("SELECT Id FROM Annotations WHERE JiraKey = ? AND Title = ? AND IsDeleted = 0", (jira_key, title))
             result = cursor.fetchone()
+            
+            # Otteniamo il timestamp attuale con informazioni sul fuso orario
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+            
             if result:
                 cursor.execute(
-                    "UPDATE Annotations SET Content = ?, UpdatedAt = CURRENT_TIMESTAMP WHERE Id = ?",
-                    (content, result[0])
+                    "UPDATE Annotations SET Content = ?, UpdatedAt = ? WHERE Id = ?",
+                    (content, current_time, result[0])
                 )
             else:
                 cursor.execute(
@@ -585,9 +615,13 @@ class DatabaseService:
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
+            # Otteniamo il timestamp attuale con informazioni sul fuso orario
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+            
             cursor.execute(
-                "UPDATE Annotations SET Title = ?, UpdatedAt = CURRENT_TIMESTAMP WHERE JiraKey = ? AND Title = ? AND IsDeleted = 0",
-                (new_title, jira_key, old_title)
+                "UPDATE Annotations SET Title = ?, UpdatedAt = ? WHERE JiraKey = ? AND Title = ? AND IsDeleted = 0",
+                (new_title, current_time, jira_key, old_title)
             )
             conn.commit()
         finally:
@@ -732,6 +766,25 @@ class DatabaseService:
             conn.commit()
         finally:
             conn.close()
+            
+    def update_local_worklog_comment(self, jira_key: str, start_time: datetime, comment: str):
+        """Updates the comment of a worklog entry based on jira_key and start_time.
+        
+        Args:
+            jira_key: The Jira issue key
+            start_time: The start time of the worklog entry
+            comment: The new comment text
+        """
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE LocalWorklogHistory SET Comment = ? WHERE JiraKey = ? AND StartTime = ?',
+                (comment, jira_key, start_time.isoformat())
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def update_worklog_duration(self, worklog_id: int, duration_seconds: int):
         """Updates the duration of a worklog entry."""
@@ -752,10 +805,30 @@ class DatabaseService:
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
+            # Prima verifica se esiste già un record per questo jira_key
             cursor.execute(
-                'INSERT OR REPLACE INTO ViewHistory (JiraKey, LastViewedAt) VALUES (?, CURRENT_TIMESTAMP)',
+                'SELECT COUNT(*) FROM ViewHistory WHERE JiraKey = ?',
                 (jira_key,)
             )
+            exists = cursor.fetchone()[0] > 0
+            
+            # Otteniamo il timestamp attuale con informazioni sul fuso orario
+            from datetime import datetime, timezone
+            # Otteniamo il timestamp UTC con il suffisso Z che indica UTC
+            current_time = datetime.now(timezone.utc).isoformat()
+            
+            if exists:
+                # Se esiste, aggiorna solo il timestamp
+                cursor.execute(
+                    'UPDATE ViewHistory SET LastViewedAt = ? WHERE JiraKey = ?',
+                    (current_time, jira_key)
+                )
+            else:
+                # Se non esiste, inserisci un nuovo record
+                cursor.execute(
+                    'INSERT INTO ViewHistory (JiraKey, LastViewedAt) VALUES (?, ?)',
+                    (jira_key, current_time)
+                )
             conn.commit()
         finally:
             conn.close()
@@ -831,17 +904,21 @@ class DatabaseService:
             cursor.execute('SELECT Id FROM JQLHistory WHERE Query = ?', (query,))
             result = cursor.fetchone()
             
+            # Otteniamo il timestamp attuale con informazioni sul fuso orario
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+            
             if result:
                 # Update existing entry
                 cursor.execute(
-                    'UPDATE JQLHistory SET LastUsedAt = CURRENT_TIMESTAMP WHERE Id = ?',
-                    (result[0],)
+                    'UPDATE JQLHistory SET LastUsedAt = ? WHERE Id = ?',
+                    (current_time, result[0])
                 )
             else:
                 # Add new entry
                 cursor.execute(
-                    'INSERT INTO JQLHistory (Query, LastUsedAt) VALUES (?, CURRENT_TIMESTAMP)',
-                    (query,)
+                    'INSERT INTO JQLHistory (Query, LastUsedAt) VALUES (?, ?)',
+                    (query, current_time)
                 )
             
             # Keep only the last 20 entries
@@ -924,9 +1001,13 @@ class DatabaseService:
                 # Column already exists, ignore
                 pass
 
+            # Otteniamo il timestamp attuale con informazioni sul fuso orario
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+            
             cursor.execute(
-                'INSERT OR REPLACE INTO NotificationSubscriptions (JiraKey, LastCheckedTimestamp, last_comment_date, is_read) VALUES (?, CURRENT_TIMESTAMP, NULL, 1)',
-                (jira_key,)
+                'INSERT OR REPLACE INTO NotificationSubscriptions (JiraKey, LastCheckedTimestamp, last_comment_date, is_read) VALUES (?, ?, NULL, 1)',
+                (jira_key, current_time)
             )
             conn.commit()
         finally:
@@ -1098,6 +1179,140 @@ class DatabaseService:
         finally:
             conn.close()
     
+    # --- File Attachment Methods ---
+    def add_file_attachment(self, jira_key: str, attachment_id: str, file_name: str, 
+                           file_path: str, file_hash: str, file_size: int, mime_type: str = None):
+        """
+        Adds or updates a file attachment record.
+        
+        Args:
+            jira_key: The Jira issue key
+            attachment_id: The unique ID of the attachment from Jira
+            file_name: The original file name
+            file_path: The local path where the file is saved
+            file_hash: SHA-256 hash of the file content for identification
+            file_size: Size of the file in bytes
+            mime_type: Optional MIME type of the file
+        """
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Get current time in ISO format with timezone info
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+            
+            cursor.execute("""
+                INSERT OR REPLACE INTO FileAttachments 
+                (JiraKey, AttachmentId, FileName, FilePath, FileHash, FileSize, MimeType, DownloadedAt, LastCheckedAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (jira_key, attachment_id, file_name, file_path, file_hash, file_size, mime_type, current_time, current_time))
+            conn.commit()
+        finally:
+            conn.close()
+    
+    def get_file_attachment(self, jira_key: str, attachment_id: str):
+        """
+        Gets a file attachment record by Jira key and attachment ID.
+        
+        Returns:
+            A dictionary with file attachment details or None if not found.
+        """
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT Id, JiraKey, AttachmentId, FileName, FilePath, FileHash, FileSize, MimeType, DownloadedAt, LastCheckedAt
+                FROM FileAttachments 
+                WHERE JiraKey = ? AND AttachmentId = ?
+            """, (jira_key, attachment_id))
+            
+            row = cursor.fetchone()
+            if not row:
+                return None
+                
+            return {
+                'id': row[0],
+                'jira_key': row[1],
+                'attachment_id': row[2],
+                'file_name': row[3],
+                'file_path': row[4],
+                'file_hash': row[5],
+                'file_size': row[6],
+                'mime_type': row[7],
+                'downloaded_at': row[8],
+                'last_checked_at': row[9]
+            }
+        finally:
+            conn.close()
+    
+    def get_file_attachments_by_jira_key(self, jira_key: str):
+        """
+        Gets all file attachments for a specific Jira issue.
+        
+        Returns:
+            A list of dictionaries with file attachment details.
+        """
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT Id, JiraKey, AttachmentId, FileName, FilePath, FileHash, FileSize, MimeType, DownloadedAt, LastCheckedAt
+                FROM FileAttachments 
+                WHERE JiraKey = ?
+                ORDER BY DownloadedAt DESC
+            """, (jira_key,))
+            
+            attachments = []
+            for row in cursor.fetchall():
+                attachments.append({
+                    'id': row[0],
+                    'jira_key': row[1],
+                    'attachment_id': row[2],
+                    'file_name': row[3],
+                    'file_path': row[4],
+                    'file_hash': row[5],
+                    'file_size': row[6],
+                    'mime_type': row[7],
+                    'downloaded_at': row[8],
+                    'last_checked_at': row[9]
+                })
+            return attachments
+        finally:
+            conn.close()
+    
+    def update_attachment_last_checked(self, jira_key: str, attachment_id: str):
+        """Updates the last checked timestamp for an attachment."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Get current time in ISO format with timezone info
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+            
+            cursor.execute("""
+                UPDATE FileAttachments
+                SET LastCheckedAt = ?
+                WHERE JiraKey = ? AND AttachmentId = ?
+            """, (current_time, jira_key, attachment_id))
+            conn.commit()
+        finally:
+            conn.close()
+            
+    def delete_file_attachment(self, jira_key: str, attachment_id: str):
+        """Removes a file attachment record."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM FileAttachments
+                WHERE JiraKey = ? AND AttachmentId = ?
+            """, (jira_key, attachment_id))
+            conn.commit()
+        finally:
+            conn.close()
+            
     def close(self):
         if self.conn:
             self.conn.close()

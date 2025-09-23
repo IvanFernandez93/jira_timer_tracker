@@ -218,6 +218,25 @@ class JiraGridView(QWidget):
                 duration=3000,  # 3 seconds
                 parent=self
             )
+        except Exception as e:
+            # Fallback to a simple print if InfoBar fails
+            print(f"Error: {message} (InfoBar error: {e})")
+            
+    def show_info(self, message):
+        """Displays an informational message using Fluent InfoBar."""
+        try:
+            InfoBar.info(
+                title="Info",
+                content=message,
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=5000,  # 5 seconds
+                parent=self
+            )
+        except Exception as e:
+            # Fallback to a simple print if InfoBar fails
+            print(f"Info: {message} (InfoBar error: {e})")
         except Exception:
             try:
                 from PyQt6.QtWidgets import QMessageBox

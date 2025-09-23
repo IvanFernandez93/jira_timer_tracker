@@ -7,6 +7,7 @@ from qfluentwidgets import Theme, setTheme, isDarkTheme
 
 from .notification_indicator import NotificationIndicator
 from .sync_status_indicator import SyncStatusIndicator
+from .network_status_indicator import NetworkStatusIndicator
 
 from .jira_grid_view import JiraGridView
 from .history_view import HistoryView
@@ -43,6 +44,10 @@ class MainWindow(FluentWindow):
         self.notification_indicator.clicked.connect(self._on_notification_clicked)
         self.notification_indicator.setVisible(False)  # Hide initially
         self.notification_indicator.setToolTip("Notifiche")
+        
+        # Create network status indicator
+        self.network_status_indicator = NetworkStatusIndicator()
+        self.network_status_indicator.clicked.connect(self._on_network_status_clicked)
         
         # Add indicators to the title bar
         self._add_indicators_to_titlebar()
@@ -166,6 +171,7 @@ class MainWindow(FluentWindow):
         # Add the indicators to the layout
         indicators_layout.addWidget(self.notification_indicator)
         indicators_layout.addWidget(self.sync_status_indicator)
+        indicators_layout.addWidget(self.network_status_indicator)
         
         # Add the frame to the title bar
         self.titleBar.layout().addWidget(indicators_frame, 0, Qt.AlignmentFlag.AlignRight)
@@ -195,10 +201,43 @@ class MainWindow(FluentWindow):
     def _on_notification_clicked(self):
         """Handles click on the notification indicator."""
         self.notificationsRequested.emit()
+    
+    def _on_network_status_clicked(self):
+        """Handles click on the network status indicator."""
+        # Mostra un menu contestuale con informazioni sullo stato e opzioni
+        menu = QMenu(self)
+        
+        # Informazioni sullo stato
+        if self.network_status_indicator._internet_connected:
+            if self.network_status_indicator._jira_connected:
+                status_action = QAction("✓ Connesso a internet e JIRA", self)
+            else:
+                status_action = QAction("⚠️ Connesso a internet, JIRA non disponibile", self)
+        else:
+            status_action = QAction("❌ Nessuna connessione a internet", self)
+        status_action.setEnabled(False)
+        menu.addAction(status_action)
+        
+        menu.addSeparator()
+        
+        # Opzione per verificare la connessione
+        check_action = QAction("Verifica connessione", self)
+        check_action.triggered.connect(self.check_connection_requested)
+        menu.addAction(check_action)
+        
+        # Mostra il menu alla posizione appropriata
+        menu.exec(self.network_status_indicator.mapToGlobal(self.network_status_indicator.rect().bottomLeft()))
         
     def update_notification_count(self, count):
         """Updates the notification indicator count."""
         self.notification_indicator.set_count(count)
+        
+    def update_network_status(self, internet_connected: bool, jira_connected: bool):
+        """Updates the network status indicator."""
+        self.network_status_indicator.set_connection_status(internet_connected, jira_connected)
+        
+    # Segnale per richiedere un controllo della connessione
+    check_connection_requested = pyqtSignal()
 
     def changeEvent(self, event):
         """Override the changeEvent to detect window state changes."""

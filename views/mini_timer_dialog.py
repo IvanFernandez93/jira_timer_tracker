@@ -1,16 +1,18 @@
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QComboBox, QPushButton, QDialog
+from PyQt6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout, QLabel, QComboBox
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtGui import QFont
 
-from qfluentwidgets import PushButton, FluentIcon
+from qfluentwidgets import PushButton, FluentIcon as FIF
 
-class MiniWidgetView(QDialog):
+class MiniTimerDialog(QDialog):
     """
-    A small, always-on-top timer window that appears when the main window is minimized.
-    Fulfills requirement 2.6, but as a regular window instead of a borderless widget.
+    A small timer window that can be used from various places in the application.
+    This implements the same interface as the mini widget but can be used as a standalone dialog.
     """
-    def __init__(self, parent=None):
+    def __init__(self, jira_key, parent=None):
         super().__init__(parent)
+        
+        self.jira_key = jira_key
         
         # Configura come una finestra normale ma sempre in primo piano
         self.setWindowFlags(
@@ -18,10 +20,10 @@ class MiniWidgetView(QDialog):
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.WindowMinimizeButtonHint
         )
-        self.setWindowTitle("Timer Jira")
-        # Usa l'icona in modo corretto
+        self.setWindowTitle(f"Timer - {jira_key}")
+        # Usa l'icona corretta
         try:
-            self.setWindowIcon(FluentIcon.CLOCK)
+            self.setWindowIcon(FIF.CLOCK)
         except Exception:
             # Fallback se l'icona non è disponibile
             pass
@@ -54,7 +56,7 @@ class MiniWidgetView(QDialog):
         """)
 
         # Jira Key and Timer
-        self.jira_key_label = QLabel("No active Jira")
+        self.jira_key_label = QLabel(jira_key)
         self.jira_key_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         
         self.timer_label = QLabel("00:00:00")
@@ -63,9 +65,9 @@ class MiniWidgetView(QDialog):
 
         # Timer controls
         controls_layout = QHBoxLayout()
-        self.play_btn = PushButton(FluentIcon.PLAY, "Play")
-        self.pause_btn = PushButton(FluentIcon.PAUSE, "Pause")
-        self.stop_btn = PushButton(FluentIcon.CLOSE, "Stop")  # Replacing STOP with CLOSE
+        self.play_btn = PushButton(FIF.PLAY, "Play")
+        self.pause_btn = PushButton(FIF.PAUSE, "Pause")
+        self.stop_btn = PushButton(FIF.CLOSE, "Stop")
 
         self.play_btn.setFixedWidth(80)
         self.pause_btn.setFixedWidth(80)
@@ -75,24 +77,36 @@ class MiniWidgetView(QDialog):
         controls_layout.addWidget(self.pause_btn)
         controls_layout.addWidget(self.stop_btn)
 
-        # Favorite Jiras ComboBox
-        self.favorites_combo = QComboBox()
-        self.favorites_combo.setPlaceholderText("Switch to favorite...")
-
-        # Restore Button
-        self.restore_btn = PushButton("Restore App")
+        # Note field
+        from PyQt6.QtWidgets import QLineEdit
+        note_layout = QHBoxLayout()
+        note_layout.addWidget(QLabel("Nota:"))
+        self.note_edit = QLineEdit()
+        self.note_edit.setPlaceholderText("Aggiungi una nota per questo tempo tracciato")
+        note_layout.addWidget(self.note_edit)
 
         # Assemble the layout
         main_layout.addWidget(self.jira_key_label)
         main_layout.addWidget(self.timer_label)
         main_layout.addLayout(controls_layout)
-        main_layout.addWidget(self.favorites_combo)
-        main_layout.addWidget(self.restore_btn)
+        main_layout.addLayout(note_layout)
 
-    def move_to_bottom_right(self, screen):
-        """Moves the window to the bottom right corner of the screen."""
-        screen_geometry = screen.availableGeometry()
-        window_geometry = self.geometry()
-        x = screen_geometry.width() - window_geometry.width() - 50
-        y = screen_geometry.height() - window_geometry.height() - 50
-        self.move(x, y)
+    def update_timer_display(self, seconds: int):
+        """Update the timer display with the given number of seconds."""
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        seconds = seconds % 60
+        time_str = f"{hours:02}:{minutes:02}:{seconds:02}"
+        self.timer_label.setText(time_str)
+
+    def get_note(self) -> str:
+        """Get the note from the note edit field."""
+        return self.note_edit.text()
+        
+    def set_note_hint(self, hint: str):
+        """Set a hint text for the note field.
+        
+        This will be displayed as a placeholder text and can be used to provide
+        additional information about the ticket, such as if it's fictional.
+        """
+        self.note_edit.setPlaceholderText(hint)

@@ -74,6 +74,14 @@ class JiraService:
     def is_connected(self) -> bool:
         """Checks if the service is connected to Jira."""
         return self.jira is not None
+        
+    def set_offline_state(self):
+        """
+        Imposta esplicitamente il servizio in modalità offline.
+        Utile quando sappiamo in anticipo che non sarà possibile connettersi.
+        """
+        self.jira = None
+        self._logger.info("Jira service set to offline state")
 
     def search_issues(self, jql: str, start_at: int = 0, max_results: int = 100, issue_keys: list[str] | None = None) -> list:
         """
@@ -205,10 +213,94 @@ class JiraService:
             self._logger.error("Error getting comments for '%s': %s", issue_key, getattr(e, 'text', None))
             raise e
             
-    def download_attachment(self, attachment_url: str, filename: str, save_path: str = None) -> str:
+    async def download_attachment(self, attachment_id: str, file_path: str) -> bool:
         """
-        Downloads an attachment from Jira and saves it to the specified path.
+        Downloads an attachment from Jira using its ID and saves it to the specified path.
+        Returns True if download was successful.
+        
+        Args:
+            attachment_id: The Jira attachment ID
+            file_path: The local file path to save the attachment to
+        
+        Returns:
+            True if the download was successful, False otherwise
+        """
+        if not self.is_connected():
+            raise ConnectionError("Not connected to Jira.")
+        
+        def _do_download():
+            import requests
+
+            # Get the attachment info from Jira
+            attachment_url = None
+            try:
+                # Try to get attachment directly from JIRA API
+                attachment = self.jira.attachment(attachment_id)
+                if attachment:
+                    attachment_url = attachment.get('content', None)
+            except Exception as ex:
+                self._logger.warning(f"Could not get attachment info via API: {ex}")
+                # Fallback to constructing URL directly
+                attachment_url = f"{self.jira.server_url}/secure/attachment/{attachment_id}"
+            
+            if not attachment_url:
+                self._logger.error("Failed to determine attachment URL for ID: %s", attachment_id)
+                return False
+
+            # Use streaming request with a timeout
+            sess = getattr(self.jira, '_session', None)
+            if sess is None:
+                # fallback to requests
+                sess = requests.Session()
+
+            resp = sess.get(attachment_url, stream=True, timeout=30)
+            try:
+                resp.raise_for_status()
+            except Exception:
+                # If 429 with Retry-After, raise JIRAError-like with status_code attribute
+                status = getattr(resp, 'status_code', None)
+                self._logger.error("Failed to download attachment, status: %s", status)
+                resp.raise_for_status()
+
+            # Ensure the directory exists
+            dir_name = os.path.dirname(file_path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+
+            # Stream to a temporary file then move atomically
+            fd, tmp_path = tempfile.mkstemp(prefix=os.path.basename(file_path) + '.', dir=dir_name or None)
+            os.close(fd)
+            try:
+                with open(tmp_path, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                # Atomic replace
+                os.replace(tmp_path, file_path)
+            except Exception as e:
+                # cleanup temp file on failure
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+                self._logger.error("Failed to save attachment: %s", e)
+                raise
+
+            self._logger.info("Successfully downloaded attachment: %s", file_path)
+            return True
+
+        try:
+            return self._with_retries(_do_download)
+        except Exception as e:
+            self._logger.error("Error downloading attachment ID '%s': %s", attachment_id, e)
+            return False
+            
+    def download_attachment_by_url(self, attachment_url: str, filename: str, save_path: str = None) -> str:
+        """
+        Downloads an attachment from Jira by URL and saves it to the specified path.
         Returns the full path of the saved file.
+        
+        Legacy method - prefer using download_attachment with attachment ID.
         """
         if not self.is_connected():
             raise ConnectionError("Not connected to Jira.")

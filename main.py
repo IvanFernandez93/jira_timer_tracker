@@ -18,6 +18,7 @@ from services.db_service import DatabaseService
 from services.app_settings import AppSettings
 from services.credential_service import CredentialService
 from services.jira_service import JiraService
+from services.attachment_service import AttachmentService
 
 # Configurazione del logging
 def setup_logging(app_settings=None):
@@ -214,6 +215,10 @@ def main():
         except Exception:
             non_retryable_statuses = None
 
+    # Initialize timezone service
+    from services.timezone_service import TimezoneService
+    timezone_service = TimezoneService(app_settings)
+    
     # Instantiate JiraService with configured retry policy
     jira_service = JiraService(
         max_retries=max_retries,
@@ -221,6 +226,10 @@ def main():
         max_delay=max_delay,
         non_retryable_statuses=non_retryable_statuses,
     )
+    
+    # Initialize attachment service
+    from services.attachment_service import AttachmentService
+    attachment_service = AttachmentService(db_service, jira_service)
     
     # Riconfigura il logging con le impostazioni caricate
     logger = setup_logging(app_settings)
@@ -245,29 +254,51 @@ def main():
 
     # 3. Attempt to connect to Jira on startup
     try:
-        logger.info(f"Connecting to {jira_url}...")
-        jira_service.connect(jira_url, pat)
-        logger.info("Connection successful.")
-    except Exception as e:
-        logger.error(f"Could not connect to Jira on startup: {e}", exc_info=True)
-        # Mostra un messaggio di errore non bloccante
+        import socket
+        # Controlla prima se il DNS può essere risolto
         try:
-            warning_box = QMessageBox()
-            try:
-                warning_box.setWindowFlag(QMessageBox.WindowType.WindowStaysOnTopHint, True)
-            except Exception:
-                pass
-            warning_box.setIcon(QMessageBox.Icon.Warning)
-            warning_box.setWindowTitle("Errore di connessione")
-            warning_box.setText(f"Impossibile connettersi a Jira: {str(e)}\n\nL'applicazione funzionerà in modalità disconnessa.")
-            warning_box.exec()
+            socket.gethostbyname("sviluppo.maggiolicloud.it")
+            can_resolve = True
+        except socket.error:
+            can_resolve = False
+            
+        if can_resolve:
+            logger.info(f"Connecting to {jira_url}...")
+            jira_service.connect(jira_url, pat)
+            logger.info("Connection successful.")
+        else:
+            logger.info("Unable to resolve Jira hostname. Starting in offline mode.")
+            # Impostiamo esplicitamente lo stato disconnesso
+            jira_service.set_offline_state()
+    except Exception as e:
+        logger.error(f"Could not connect to Jira on startup: {e}")
+        # Mostra un messaggio di errore non bloccante ma solo se non è un errore di DNS
+        try:
+            # Non mostrare il popup se è un errore di DNS o connessione di rete
+            if not isinstance(e, (socket.gaierror, socket.timeout, ConnectionError)) and not "getaddrinfo failed" in str(e):
+                warning_box = QMessageBox()
+                try:
+                    warning_box.setWindowFlag(QMessageBox.WindowType.WindowStaysOnTopHint, True)
+                except Exception:
+                    pass
+                warning_box.setIcon(QMessageBox.Icon.Warning)
+                warning_box.setWindowTitle("Errore di connessione")
+                warning_box.setText(f"Impossibile connettersi a Jira: {str(e)}\n\nL'applicazione funzionerà in modalità disconnessa.")
+                warning_box.exec()
         except Exception:
             # Final fallback: log and continue (do not crash the app because of UI errors)
             logger.exception('Failed to show connection warning dialog')
     
     # 4. Setup main window and controller (MVC)
     main_window = MainWindow()
-    main_controller = MainController(main_window, db_service, jira_service, app_settings)
+    main_controller = MainController(main_window, db_service, jira_service, app_settings, timezone_service)
+    # Attach the attachment service to the main controller
+    main_controller.attachment_service = attachment_service
+    
+    # Set initial network status based on connection attempt result
+    main_controller.is_internet_available = True  # Presumed true since we got to this point
+    main_controller.is_jira_available = jira_service.is_connected()
+    
     main_controller.show_initial_view() # Show default view (req 2.3.5)
     main_window.show()
     sys.exit(app.exec())

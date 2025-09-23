@@ -433,6 +433,13 @@ class JiraDetailController(QObject):
         self.view.upload_attachment_btn.clicked.connect(self._upload_attachment)
         self.view.download_selected_btn.clicked.connect(self._download_selected_attachments)
         self.view.download_all_btn.clicked.connect(self._download_all_attachments)
+        
+        # Additional attachment button for managing attachments through the dialog
+        from PyQt6.QtWidgets import QPushButton
+        self.view.manage_attachments_btn = QPushButton("Manage Attachments")
+        self.view.manage_attachments_btn.setToolTip("Open the attachments management dialog")
+        self.view.attachments_layout.addWidget(self.view.manage_attachments_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.view.manage_attachments_btn.clicked.connect(self._show_attachments_dialog)
 
         # Annotation signals
         self.view.add_note_btn.clicked.connect(self._add_new_note_tab)
@@ -532,10 +539,16 @@ class JiraDetailController(QObject):
             # Use 'updated' for more accuracy, fallback to 'created'
             timestamp_str = comment.get('updated', comment.get('created', ''))
             
-            # Parse the timestamp and format it nicely
+            # Parse the timestamp and format it nicely, converting from UTC to local time
             try:
+                # Parse the UTC datetime
                 dt_object = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                formatted_date = dt_object.strftime('%d %b %Y at %H:%M')
+                
+                # Convert to local time
+                local_dt = dt_object.astimezone()  # Senza argomenti, astimezone converte al fuso orario locale
+                
+                # Format for display with local timezone
+                formatted_date = local_dt.strftime('%d %b %Y at %H:%M')
             except ValueError:
                 formatted_date = "on an unknown date"
 
@@ -1354,7 +1367,7 @@ class JiraDetailController(QObject):
             
             # Check if auto-sync is enabled
             from services.app_settings import AppSettings
-            app_settings = AppSettings()
+            app_settings = AppSettings(self.db_service)
             auto_sync = app_settings.get_setting("auto_sync", "false").lower() == "true"
 
         # Reset everything
@@ -1413,10 +1426,16 @@ class JiraDetailController(QObject):
         from PyQt6.QtGui import QColor, QBrush
         
         for row, (log_id, start_time, duration_seconds, comment, sync_status, task) in enumerate(time_logs):
-            # Format start time
+            # Format start time and convert from UTC to local time
             try:
+                # Parse the UTC datetime
                 dt_object = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                formatted_date = dt_object.strftime('%d %b %Y %H:%M')
+                
+                # Convert to local time
+                local_dt = dt_object.astimezone()  # Senza argomenti, astimezone converte al fuso orario locale
+                
+                # Format for display with local timezone
+                formatted_date = local_dt.strftime('%d %b %Y %H:%M')
             except ValueError:
                 formatted_date = "Unknown date"
                 
@@ -1808,6 +1827,40 @@ class JiraDetailController(QObject):
         self.view.attachments_layout.addWidget(error_label)
         
         print(f"Error in IssueDetailLoaderWorker: {error_message}")
+        
+    def _show_attachments_dialog(self):
+        """Show the attachments management dialog."""
+        try:
+            # Get or create attachment controller
+            from controllers.attachment_controller import AttachmentController
+            
+            # First try to get the main controller's attachment controller (preferred)
+            main_controller = None
+            from PyQt6.QtWidgets import QApplication
+            for widget in QApplication.topLevelWidgets():
+                if hasattr(widget, 'controller') and hasattr(widget.controller, 'attachment_controller'):
+                    main_controller = widget.controller
+                    break
+            
+            if main_controller and hasattr(main_controller, 'attachment_controller'):
+                # Use the main controller's attachment controller
+                attachment_controller = main_controller.attachment_controller
+                _logger.debug("Using main controller's attachment controller")
+            else:
+                # Create a new attachment controller as fallback
+                _logger.debug("Creating new attachment controller")
+                attachment_controller = AttachmentController(
+                    self.db_service, 
+                    self.jira_service, 
+                    None  # No app_settings, not critical
+                )
+                
+            # Show the attachments dialog
+            attachment_controller.show_attachments_dialog(self.jira_key, parent=self.view)
+            
+        except Exception as e:
+            _logger.error(f"Failed to open attachments dialog: {e}", exc_info=True)
+            QMessageBox.warning(self.view, "Error", f"Failed to open attachments dialog: {e}")
 
     def _on_time_history_cell_changed(self, row, column):
         """Handles inline editing of comment and duration in the time history table."""
@@ -1864,13 +1917,18 @@ class JiraDetailController(QObject):
         if reporter:
             content_lines.append(f"- **Reporter**: {reporter}")
         
-        # Add created/updated dates if available
+        # Add created/updated dates if available (converted to local time)
         created = fields.get('created')
         if created:
             try:
                 from datetime import datetime
+                
+                # Parse the UTC datetime and convert to local time
                 dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
-                content_lines.append(f"- **Created**: {dt.strftime('%d %b %Y at %H:%M')}")
+                local_dt = dt.astimezone()  # Senza argomenti, astimezone converte al fuso orario locale
+                
+                # Format for display with local timezone
+                content_lines.append(f"- **Created**: {local_dt.strftime('%d %b %Y at %H:%M')}")
             except:
                 pass
                 
@@ -1878,8 +1936,13 @@ class JiraDetailController(QObject):
         if updated:
             try:
                 from datetime import datetime
+                
+                # Parse the UTC datetime and convert to local time
                 dt = datetime.fromisoformat(updated.replace('Z', '+00:00'))
-                content_lines.append(f"- **Updated**: {dt.strftime('%d %b %Y at %H:%M')}")
+                local_dt = dt.astimezone()  # Senza argomenti, astimezone converte al fuso orario locale
+                
+                # Format for display with local timezone
+                content_lines.append(f"- **Updated**: {local_dt.strftime('%d %b %Y at %H:%M')}")
             except:
                 pass
         

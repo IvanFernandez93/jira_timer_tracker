@@ -67,6 +67,17 @@ class ConfigController:
             self.view.set_mini_widget_enabled(mini_widget_enabled)
         except Exception:
             pass
+            
+        # Set timezone
+        timezone = self.app_settings.get_setting("timezone", "local")
+        try:
+            # Set the timezone combo to the saved value
+            for i in range(self.view.timezone_combo.count()):
+                if self.view.timezone_combo.itemData(i) == timezone:
+                    self.view.timezone_combo.setCurrentIndex(i)
+                    break
+        except Exception:
+            pass
         
         # Set logging checkboxes based on saved settings
         self.view.log_info_checkbox.setChecked(self.app_settings.get_setting("log_info", "true").lower() == "true")
@@ -141,6 +152,10 @@ class ConfigController:
             # Save notification colors
             self.app_settings.set_setting("notification_unread_color", notification_unread_color)
             self.app_settings.set_setting("notification_read_color", notification_read_color)
+            
+            # Save timezone setting
+            timezone = config.get("timezone", "local")
+            self.app_settings.set_setting("timezone", timezone)
 
             # Notifica all'utente che le impostazioni di logging saranno applicate al prossimo avvio
             import logging

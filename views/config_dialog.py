@@ -2,7 +2,7 @@ from PyQt6.QtCore import Qt
 import logging
 
 logger = logging.getLogger('JiraTimeTracker')
-from PyQt6.QtWidgets import QTabWidget, QWidget, QVBoxLayout, QDialog, QDialogButtonBox, QCheckBox
+from PyQt6.QtWidgets import QTabWidget, QWidget, QVBoxLayout, QDialog, QDialogButtonBox, QCheckBox, QHBoxLayout, QColorDialog, QPushButton
 from qfluentwidgets import (
     LineEdit, PushButton, BodyLabel, StrongBodyLabel, 
     FluentIcon as FIF, InfoBar, InfoBarPosition, TextEdit,
@@ -135,13 +135,64 @@ class ConfigDialog(QDialog):
             self.column_config_btn.clicked.connect(self._open_column_config)
         except Exception:
             pass
+            
+        # Timezone configuration section
+        layout.addWidget(StrongBodyLabel("Configurazione del fuso orario:"))
+        layout.addWidget(BodyLabel("Imposta il fuso orario per la visualizzazione delle date."))
+        
+        # Timezone selection combobox
+        timezone_layout = QHBoxLayout()
+        timezone_layout.addWidget(BodyLabel("Fuso orario:"))
+        
+        self.timezone_combo = ComboBox()
+        
+        # Get timezone options - first the current local timezone, then UTC, then common options
+        import datetime
+        
+        # Add system timezone first (default)
+        local_tz = datetime.datetime.now().astimezone().tzinfo
+        self.timezone_combo.addItem(f"Sistema ({local_tz})", "local")
+        
+        # Add UTC
+        self.timezone_combo.addItem("UTC", "UTC")
+        
+        # Add common European timezones
+        self.timezone_combo.addItem("Europe/Rome", "Europe/Rome")
+        self.timezone_combo.addItem("Europe/Madrid", "Europe/Madrid")
+        self.timezone_combo.addItem("Europe/Paris", "Europe/Paris")
+        self.timezone_combo.addItem("Europe/London", "Europe/London")
+        self.timezone_combo.addItem("Europe/Berlin", "Europe/Berlin")
+        
+        # Add Americas timezones
+        self.timezone_combo.addItem("US/Eastern", "US/Eastern")
+        self.timezone_combo.addItem("US/Central", "US/Central")
+        self.timezone_combo.addItem("US/Mountain", "US/Mountain")
+        self.timezone_combo.addItem("US/Pacific", "US/Pacific")
+        
+        self.timezone_combo.setToolTip("Seleziona il fuso orario per la visualizzazione delle date")
+        timezone_layout.addWidget(self.timezone_combo)
+        timezone_layout.addStretch()
+        layout.addLayout(timezone_layout)
+        
+        # Current time display with selected timezone
+        timezone_sample_layout = QHBoxLayout()
+        timezone_sample_layout.addWidget(BodyLabel("Data e ora attuale con il fuso orario selezionato:"))
+        self.timezone_sample_label = BodyLabel("")
+        self.timezone_sample_label.setStyleSheet("background-color: #f0f0f0; padding: 5px; border-radius: 3px;")
+        timezone_sample_layout.addWidget(self.timezone_sample_label)
+        layout.addLayout(timezone_sample_layout)
+        
+        # Update sample when combo changes
+        self.timezone_combo.currentIndexChanged.connect(self._update_timezone_sample)
+        
+        # Initialize sample
+        self._update_timezone_sample()
         
         # Notification colors section
         layout.addWidget(StrongBodyLabel("Colori delle Notifiche:"))
         layout.addWidget(BodyLabel("Configura i colori per evidenziare le notifiche lette e non lette."))
         
         # Unread notifications color
-        from PyQt6.QtWidgets import QHBoxLayout, QColorDialog, QPushButton
         unread_layout = QHBoxLayout()
         unread_layout.addWidget(BodyLabel("Notifiche non lette:"))
         
@@ -170,7 +221,6 @@ class ConfigDialog(QDialog):
         layout.addStretch()
         
         # Always-on-top option
-        from PyQt6.QtWidgets import QHBoxLayout
         always_layout = QHBoxLayout()
         always_layout.addWidget(BodyLabel("Mantieni l'applicazione in primo piano:"))
         self.always_on_top_switch = SwitchButton("Sempre in primo piano")
@@ -284,7 +334,6 @@ class ConfigDialog(QDialog):
         layout.addWidget(self.app_data_path_label)
         
         # Add buttons to open folders
-        from PyQt6.QtWidgets import QHBoxLayout
         buttons_layout = QHBoxLayout()
         
         self.open_db_folder_btn = PushButton("Apri Cartella Database")
@@ -300,7 +349,6 @@ class ConfigDialog(QDialog):
         layout.addLayout(buttons_layout)
 
         # Add small indicators to show if the paths actually exist; disable open buttons if missing
-        from PyQt6.QtWidgets import QHBoxLayout, QLabel
         self._db_exists_label = BodyLabel("")
         self._logs_exists_label = BodyLabel("")
         # Place indicators under the respective labels
@@ -331,7 +379,6 @@ class ConfigDialog(QDialog):
     
     def _select_color(self, button, color_type):
         """Open color dialog to select notification color."""
-        from PyQt6.QtWidgets import QColorDialog
         from PyQt6.QtGui import QColor
         
         # Get current color from button style
@@ -350,6 +397,46 @@ class ConfigDialog(QDialog):
             else:
                 self._read_color = color.name()
     
+    def _update_timezone_sample(self):
+        """Updates the timezone sample label with the current date/time in the selected timezone."""
+        try:
+            import datetime
+            import pytz
+            
+            # Get the selected timezone
+            tz_data = self.timezone_combo.currentData()
+            
+            # Handle different timezone formats
+            if tz_data == "local":
+                # Local timezone
+                now = datetime.datetime.now().astimezone()
+                tz_name = str(now.tzinfo)
+            elif tz_data == "UTC":
+                # UTC timezone
+                now = datetime.datetime.now(pytz.UTC)
+                tz_name = "UTC"
+            else:
+                # Named timezone
+                try:
+                    tz = pytz.timezone(tz_data)
+                    now = datetime.datetime.now(tz)
+                    tz_name = tz_data
+                except Exception:
+                    # Fallback to local
+                    now = datetime.datetime.now().astimezone()
+                    tz_name = str(now.tzinfo)
+            
+            # Format date and time nicely
+            formatted_time = now.strftime("%d/%m/%Y %H:%M:%S")
+            self.timezone_sample_label.setText(f"{formatted_time} ({tz_name})")
+        except ImportError:
+            # pytz might not be installed, use simple display
+            import datetime
+            now = datetime.datetime.now()
+            self.timezone_sample_label.setText(f"{now.strftime('%d/%m/%Y %H:%M:%S')} (fuso orario locale)")
+        except Exception as e:
+            self.timezone_sample_label.setText(f"Errore: {str(e)}")
+    
     def get_values(self):
         return {
             "url": self.jira_url_input.text().strip(),
@@ -363,6 +450,7 @@ class ConfigDialog(QDialog):
             "notification_read_color": self._read_color,
             "always_on_top": self.get_always_on_top(),
             "mini_widget_enabled": self.get_mini_widget_enabled(),
+            "timezone": self.timezone_combo.currentData(),
         }
 
     def _open_column_config(self):

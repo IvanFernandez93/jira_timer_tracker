@@ -55,8 +55,39 @@ class HistoryViewController(QObject):
             title = self._get_issue_title(jira_key)
             title_item = QTableWidgetItem(title)
             
-            # Format the timestamp
-            date_str = last_viewed_at.split(".")[0].replace("T", " ")  # Simple formatting
+            # Format the timestamp and convert from UTC to local time
+            try:
+                # Importiamo datetime per la conversione di fuso orario
+                from datetime import datetime, timezone, timedelta
+                import time
+                
+                # Determiniamo se la stringa è in formato ISO o SQLite
+                if 'T' in last_viewed_at or 'Z' in last_viewed_at:
+                    # Formato ISO
+                    dt_utc = datetime.fromisoformat(last_viewed_at.replace('Z', '+00:00'))
+                else:
+                    # Formato SQLite - assumiamo che sia già UTC
+                    dt_utc = datetime.strptime(last_viewed_at, "%Y-%m-%d %H:%M:%S")
+                    dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+                
+                # Otteniamo l'offset del fuso orario locale in modo esplicito
+                # Su Windows time.localtime().tm_gmtoff può non essere disponibile
+                # Calcoliamo l'offset in un modo compatibile con Windows
+                local_now = datetime.now()
+                utc_now = datetime.now(timezone.utc)
+                utc_offset = local_now - utc_now.replace(tzinfo=None)
+                utc_offset_sec = int(utc_offset.total_seconds())
+                
+                # Converte a fuso orario locale usando l'offset esplicito
+                dt_local = dt_utc.replace(tzinfo=timezone.utc).astimezone(timezone(timedelta(seconds=utc_offset_sec)))
+                
+                # Formatta la data secondo le preferenze locali
+                date_str = dt_local.strftime("%d/%m/%Y %H:%M:%S")
+            except Exception as e:
+                # In caso di errore, usa il formato semplice precedente
+                date_str = last_viewed_at.split(".")[0].replace("T", " ")
+                print(f"Error converting date: {e}")
+                
             date_item = QTableWidgetItem(date_str)
             
             # Set items in the table

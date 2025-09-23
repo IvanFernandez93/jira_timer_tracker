@@ -2,3 +2,5 @@ PyQt6 # Or PySide6, as per requirements. I'll use PyQt6 as the primary example.
 jira
 markdown
 keyring
+pytz  # For timezone handling
+python-dateutil  # For advanced date parsing

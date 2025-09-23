@@ -16,8 +16,26 @@ import json
 
 from views.markdown_editor import MarkdownEditor
 
+class SortableTableItem(QTableWidgetItem):
+    """Item personalizzato per il QTableWidget che supporta l'ordinamento corretto dei tipi di dati."""
+    
+    def __init__(self, text="", sort_key=None):
+        super().__init__(text)
+        self._sort_key = sort_key
+        
+    def __lt__(self, other):
+        """Metodo di confronto per l'ordinamento personalizzato."""
+        if self._sort_key is not None and hasattr(other, '_sort_key') and other._sort_key is not None:
+            return self._sort_key < other._sort_key
+        return super().__lt__(other)
+
 class NotesManagerDialog(QDialog):
     """Dialog for complete notes management with CRUD operations, tags, and soft delete."""
+    
+    # Segnali per richiedere l'apertura di altre viste
+    all_notes_requested = pyqtSignal()
+    open_jira_detail_requested = pyqtSignal(str)  # Emette la chiave Jira
+    start_timer_requested = pyqtSignal(str)  # Emette la chiave Jira per avviare il timer
 
     def __init__(self, db_service, app_settings, parent=None):
         super().__init__(parent)
@@ -48,10 +66,13 @@ class NotesManagerDialog(QDialog):
         self.new_btn.setIcon(FIF.ADD)
         self.refresh_btn = PushButton("Aggiorna")
         self.refresh_btn.setIcon(FIF.UPDATE)
+        self.all_notes_btn = PushButton("Tutte le Note")
+        self.all_notes_btn.setIcon(FIF.LIST)
 
         self.header_layout.addWidget(self.title_label)
         self.header_layout.addWidget(self.new_btn)
         self.header_layout.addWidget(self.refresh_btn)
+        self.header_layout.addWidget(self.all_notes_btn)
         self.main_layout.addLayout(self.header_layout)
 
         # Create splitter for main content
@@ -91,6 +112,10 @@ class NotesManagerDialog(QDialog):
         self.notes_table.setAlternatingRowColors(True)
         self.notes_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.notes_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        # Abilita l'ordinamento delle colonne
+        self.notes_table.setSortingEnabled(True)
+        # Ordina per default per data di aggiornamento decrescente (più recenti prima)
+        self.notes_table.horizontalHeader().setSortIndicator(3, Qt.SortOrder.DescendingOrder)
         self.left_layout.addWidget(self.notes_table)
 
         # Right panel - Note editor
@@ -104,10 +129,32 @@ class NotesManagerDialog(QDialog):
         # Note form
         self.form_layout = QFormLayout()
 
+        # Jira Key con pulsanti per aprire dettaglio e avviare timer
+        jira_key_layout = QHBoxLayout()
         self.jira_key_edit = QLineEdit()
         self.jira_key_edit.setPlaceholderText("Opzionale - lascia vuoto per nota generale")
         self.jira_key_edit.setToolTip("Chiave Jira associata alla nota (opzionale)")
-        self.form_layout.addRow("Jira Key:", self.jira_key_edit)
+        jira_key_layout.addWidget(self.jira_key_edit)
+        
+        # Pulsante per aprire il dettaglio della Jira
+        self.open_jira_btn = PushButton()
+        self.open_jira_btn.setIcon(FIF.LINK)
+        self.open_jira_btn.setToolTip("Apri dettaglio del ticket Jira")
+        self.open_jira_btn.setFixedSize(32, 32)
+        self.open_jira_btn.clicked.connect(self._open_jira_detail)
+        self.open_jira_btn.setEnabled(False)  # Disabilitato finché non c'è una Jira valida
+        jira_key_layout.addWidget(self.open_jira_btn)
+        
+        # Pulsante per avviare il timer per la Jira
+        self.start_timer_btn = PushButton()
+        self.start_timer_btn.setIcon(FIF.CLOCK)
+        self.start_timer_btn.setToolTip("Avvia timer per questo ticket")
+        self.start_timer_btn.setFixedSize(32, 32)
+        self.start_timer_btn.clicked.connect(self._start_timer)
+        self.start_timer_btn.setEnabled(False)  # Disabilitato finché non c'è una Jira valida
+        jira_key_layout.addWidget(self.start_timer_btn)
+        
+        self.form_layout.addRow("Jira Key:", jira_key_layout)
 
         self.title_edit = QLineEdit()
         self.title_edit.setPlaceholderText("Titolo della nota")
@@ -175,17 +222,19 @@ class NotesManagerDialog(QDialog):
         self.button_box.rejected.connect(self.accept)
         self.new_btn.clicked.connect(self.create_new_note)
         self.refresh_btn.clicked.connect(self.load_notes)
+        self.all_notes_btn.clicked.connect(self.show_all_notes_grid)
         self.search_box.textChanged.connect(self.apply_filters)
         self.tag_filter_combo.currentIndexChanged.connect(self.apply_filters)
         self.show_deleted_cb.toggled.connect(self.on_show_deleted_toggled)
         self.notes_table.itemSelectionChanged.connect(self.on_note_selected)
+        self.notes_table.doubleClicked.connect(self._on_table_double_clicked)
         self.save_btn.clicked.connect(self.save_note)
         self.delete_btn.clicked.connect(self.delete_note)
         self.restore_btn.clicked.connect(self.restore_note)
         self.title_edit.textChanged.connect(self.on_content_changed)
         self.content_edit.textChanged.connect(self.on_content_changed)
         self.tags_edit.textChanged.connect(self.on_content_changed)
-        self.jira_key_edit.textChanged.connect(self.on_content_changed)
+        self.jira_key_edit.textChanged.connect(self._on_jira_key_changed)
 
         # Load initial data
         self.load_tags()
@@ -206,16 +255,21 @@ class NotesManagerDialog(QDialog):
     def load_notes(self):
         """Load all notes from database."""
         try:
+            # Disattiva temporaneamente l'ordinamento durante il caricamento
+            current_sort_column = self.notes_table.horizontalHeader().sortIndicatorSection()
+            current_sort_order = self.notes_table.horizontalHeader().sortIndicatorOrder()
+            self.notes_table.setSortingEnabled(False)
+            
             notes = self.db_service.get_all_notes(include_deleted=self.show_deleted)
-
             self.notes_table.setRowCount(0)
 
             for note in notes:
                 row_position = self.notes_table.rowCount()
                 self.notes_table.insertRow(row_position)
 
-                # Title
+                # Title - Ordinabile normalmente come testo
                 title_item = QTableWidgetItem(note['title'])
+                title_item.setData(Qt.ItemDataRole.UserRole, note['id'])  # Store note ID
                 if note['is_deleted']:
                     title_item.setForeground(Qt.GlobalColor.gray)
                     font = title_item.font()
@@ -223,33 +277,42 @@ class NotesManagerDialog(QDialog):
                     title_item.setFont(font)
                 self.notes_table.setItem(row_position, 0, title_item)
 
-                # Jira Key
+                # Jira Key - Ordinabile normalmente come testo
                 jira_item = QTableWidgetItem(note['jira_key'] or "")
                 if note['is_deleted']:
                     jira_item.setForeground(Qt.GlobalColor.gray)
                 self.notes_table.setItem(row_position, 1, jira_item)
 
-                # Tags
+                # Tags - Ordinabile normalmente come testo
                 tags_item = QTableWidgetItem(note['tags'])
                 if note['is_deleted']:
                     tags_item.setForeground(Qt.GlobalColor.gray)
                 self.notes_table.setItem(row_position, 2, tags_item)
 
-                # Updated date
+                # Updated date - Ordinabile cronologicamente
                 try:
                     from datetime import datetime
-                    dt = datetime.fromisoformat(note['updated_at'].replace('Z', '+00:00'))
-                    formatted_date = dt.strftime("%d/%m/%Y %H:%M")
-                except:
-                    formatted_date = note['updated_at']
-
-                date_item = QTableWidgetItem(formatted_date)
+                    # Ottiene il timestamp UTC
+                    dt_utc = datetime.fromisoformat(note['updated_at'].replace('Z', '+00:00'))
+                    
+                    # Converte a fuso orario locale
+                    dt_local = dt_utc.astimezone()  # Senza argomenti, astimezone converte al fuso locale
+                    
+                    formatted_date = dt_local.strftime("%d/%m/%Y %H:%M")
+                    
+                    # Utilizziamo SortableTableItem per l'ordinamento corretto delle date
+                    date_item = SortableTableItem(formatted_date, dt_local.timestamp())
+                except Exception:
+                    formatted_date = note['updated_at'] or ""
+                    date_item = QTableWidgetItem(formatted_date)
+                
                 if note['is_deleted']:
                     date_item.setForeground(Qt.GlobalColor.gray)
                 self.notes_table.setItem(row_position, 3, date_item)
-
-                # Store note ID in the title item
-                title_item.setData(Qt.ItemDataRole.UserRole, note['id'])
+                
+            # Riattiva l'ordinamento e ripristina l'indicatore precedente
+            self.notes_table.setSortingEnabled(True)
+            self.notes_table.horizontalHeader().setSortIndicator(current_sort_column, current_sort_order)
 
         except Exception as e:
             QMessageBox.warning(self, "Errore", f"Errore nel caricamento delle note: {str(e)}")
@@ -319,19 +382,23 @@ class NotesManagerDialog(QDialog):
 
             self.current_note_id = note_id
             self.jira_key_edit.setText(note['jira_key'] or "")
+            has_jira = bool(note['jira_key'])
+            self.open_jira_btn.setEnabled(has_jira)  # Abilita il pulsante se c'è una chiave Jira
+            self.start_timer_btn.setEnabled(has_jira)  # Abilita il pulsante del timer se c'è una chiave Jira
             self.title_edit.setText(note['title'])
             self.tags_edit.setText(note['tags'])
             self.content_edit.setMarkdown(note['content'])
 
             # Update info label
             try:
-                created_dt = datetime.fromisoformat(note['created_at'].replace('Z', '+00:00'))
-                updated_dt = datetime.fromisoformat(note['updated_at'].replace('Z', '+00:00'))
+                # Converti tutte le date da UTC a fuso orario locale
+                created_dt = datetime.fromisoformat(note['created_at'].replace('Z', '+00:00')).astimezone()
+                updated_dt = datetime.fromisoformat(note['updated_at'].replace('Z', '+00:00')).astimezone()
                 created_str = created_dt.strftime("%d/%m/%Y %H:%M")
                 updated_str = updated_dt.strftime("%d/%m/%Y %H:%M")
 
                 if note['is_deleted']:
-                    deleted_dt = datetime.fromisoformat(note['deleted_at'].replace('Z', '+00:00'))
+                    deleted_dt = datetime.fromisoformat(note['deleted_at'].replace('Z', '+00:00')).astimezone()
                     deleted_str = deleted_dt.strftime("%d/%m/%Y %H:%M")
                     self.info_label.setText(f"Creata: {created_str} | Aggiornata: {updated_str} | Eliminata: {deleted_str}")
                 else:
@@ -384,8 +451,17 @@ class NotesManagerDialog(QDialog):
                 )
 
             self.save_btn.setEnabled(False)
+            
+            # Memorizza l'ID della nota corrente prima di ricaricare
+            saved_note_id = self.current_note_id
+            
+            # Ricarica le note e i tag
             self.load_notes()  # Refresh the list
             self.load_tags()  # Refresh tags in filter
+            
+            # Riseleziona la nota appena salvata nella tabella
+            if saved_note_id:
+                self._select_note_by_id(saved_note_id)
 
             QMessageBox.information(self, "Successo", "Nota salvata con successo.")
 
@@ -428,6 +504,77 @@ class NotesManagerDialog(QDialog):
         except Exception as e:
             QMessageBox.warning(self, "Errore", f"Errore nel ripristino della nota: {str(e)}")
 
+    def show_all_notes_grid(self):
+        """Shows a dialog with all notes in a grid view."""
+        try:
+            # Emette un segnale per richiedere l'apertura del dialogo delle note
+            from PyQt6.QtCore import pyqtSignal
+            if not hasattr(self.__class__, 'all_notes_requested'):
+                self.__class__.all_notes_requested = pyqtSignal()
+            self.all_notes_requested.emit()
+        except Exception as e:
+            QMessageBox.warning(self, "Errore", f"Errore nell'apertura della vista note: {str(e)}")
+            
+    def _open_jira_detail(self):
+        """Opens the detail view for the Jira issue associated with the current note."""
+        jira_key = self.jira_key_edit.text().strip()
+        if jira_key:
+            self.open_jira_detail_requested.emit(jira_key)
+    
+    def _on_jira_key_changed(self):
+        """Handle changes to the Jira key field."""
+        # Aggiorna lo stato dei pulsanti in base alla presenza di una chiave Jira
+        jira_key = self.jira_key_edit.text().strip()
+        has_jira = bool(jira_key)
+        self.open_jira_btn.setEnabled(has_jira)
+        self.start_timer_btn.setEnabled(has_jira)
+        # Chiamare anche il metodo originale per gestire le modifiche al contenuto
+        self.on_content_changed()
+        
+    def _start_timer(self):
+        """Avvia il timer per il ticket Jira associato alla nota corrente."""
+        jira_key = self.jira_key_edit.text().strip()
+        if jira_key:
+            self.start_timer_requested.emit(jira_key)
+        
+    def _on_table_double_clicked(self, model_index):
+        """Handle double-click on table row."""
+        row = model_index.row()
+        # Se è stata cliccata la colonna Jira Key e c'è un valore, apri il dettaglio
+        if model_index.column() == 1:  # Colonna Jira Key
+            jira_key = self.notes_table.item(row, 1).text().strip()
+            if jira_key:
+                # Se la cella contiene una chiave Jira valida, offri la possibilità di aprire il dettaglio o avviare il timer
+                from PyQt6.QtWidgets import QMenu, QCursor
+                menu = QMenu(self)
+                open_detail_action = menu.addAction("Apri dettaglio")
+                open_detail_action.setIcon(QIcon(FIF.LINK.path))
+                start_timer_action = menu.addAction("Avvia timer")
+                start_timer_action.setIcon(QIcon(FIF.CLOCK.path))
+                
+                # Mostra il menu contestuale al punto del click
+                action = menu.exec(QCursor.pos())
+                
+                if action == open_detail_action:
+                    self.open_jira_detail_requested.emit(jira_key)
+                elif action == start_timer_action:
+                    self.start_timer_requested.emit(jira_key)
+    
+    def _select_note_by_id(self, note_id):
+        """Seleziona una nota nella tabella dato il suo ID."""
+        if note_id is None:
+            return
+            
+        # Cerca la nota nella tabella tramite ID memorizzato in UserRole
+        for row in range(self.notes_table.rowCount()):
+            item = self.notes_table.item(row, 0)  # Il title item contiene l'ID della nota
+            if item and item.data(Qt.ItemDataRole.UserRole) == note_id:
+                # Seleziona la riga trovata
+                self.notes_table.selectRow(row)
+                # Assicura che la riga sia visibile
+                self.notes_table.scrollToItem(item)
+                return
+        
     def closeEvent(self, event):
         """Handle dialog closing."""
         super().closeEvent(event)

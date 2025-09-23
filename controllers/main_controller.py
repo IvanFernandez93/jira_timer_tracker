@@ -1,5 +1,5 @@
 from PyQt6.QtCore import QObject, pyqtSignal, QThread, Qt, QTimer, QEvent
-from PyQt6.QtWidgets import QTableWidgetItem, QPushButton, QApplication
+from PyQt6.QtWidgets import QTableWidgetItem, QPushButton, QApplication, QMessageBox
 from qfluentwidgets import FluentIcon as FIF
 import logging
 import re
@@ -13,6 +13,7 @@ from controllers.jql_history_controller import JqlHistoryController
 from controllers.history_view_controller import HistoryViewController
 from controllers.sync_queue_controller import SyncQueueController
 from controllers.notification_controller import NotificationController
+from services.network_service import NetworkService
 
 
 class MainController(QObject):
@@ -20,13 +21,14 @@ class MainController(QObject):
     data_loaded = pyqtSignal(list)
     load_failed = pyqtSignal(str)
 
-    def __init__(self, view, db_service, jira_service, app_settings):
+    def __init__(self, view, db_service, jira_service, app_settings, timezone_service=None):
         super().__init__()
         self._logger = logging.getLogger('JiraTimeTracker')
         self.view = view
         self.db_service = db_service
         self.jira_service = jira_service
         self.app_settings = app_settings
+        self.timezone_service = timezone_service
         self.open_detail_windows = {}  # Track open detail windows by issue key
         # Track active threads started by this controller so we can shut them down
         self._active_threads: list[QThread] = []
@@ -62,6 +64,8 @@ class MainController(QObject):
         self._setup_history_view_controller()
         self._setup_sync_queue_monitor()
         self._setup_notification_controller()
+        self._setup_attachment_controller()
+        self._setup_network_monitoring()
         self._connect_signals()
         
         # Configure grid view with app settings for persistence
@@ -119,6 +123,35 @@ class MainController(QObject):
         
         # Start notification checks (will check immediately once)
         self.notification_controller.start_notification_checks()
+        
+    def _setup_attachment_controller(self):
+        """Sets up the attachment controller."""
+        from controllers.attachment_controller import AttachmentController
+        
+        # Create the attachment controller with the attachment service
+        # that was created in main.py and assigned to this controller
+        self.attachment_controller = AttachmentController(
+            self.db_service,
+            self.jira_service,
+            self.app_settings,
+            attachment_service=getattr(self, 'attachment_service', None)
+        )
+        
+    def _setup_network_monitoring(self):
+        """Sets up the network monitoring service."""
+        # Initial network status
+        self.is_internet_available = False
+        self.is_jira_available = False
+        
+        # Intervallo di controllo: 30 secondi
+        self.network_service = NetworkService(self.jira_service, check_interval=30000)
+        
+        # Connect signals for network status changes
+        self.network_service.connection_changed.connect(self._on_internet_connection_changed)
+        self.network_service.jira_connection_changed.connect(self._on_jira_connection_changed)
+        
+        # Start the monitoring
+        self.network_service.start_monitoring()
 
     def _connect_signals(self):
         """Connect signals from the view to controller slots."""
@@ -129,6 +162,7 @@ class MainController(QObject):
         self.view.notesRequested.connect(self._show_notes_manager_dialog)
         self.view.syncQueueRequested.connect(self._show_sync_queue_dialog)
         self.view.notificationsRequested.connect(self._show_notifications_dialog)
+        self.view.check_connection_requested.connect(self._check_connection_manually)
 
         # Connect signals for data loading
         self.data_loaded.connect(self._on_data_loaded)
@@ -201,6 +235,9 @@ class MainController(QObject):
         # Initialize history view
         self.history_controller.load_history()
         
+        # Aggiorna lo stato della connessione
+        self.view.update_network_status(self.is_internet_available, self.is_jira_available)
+        
         # Start Jira issues loading asynchronously
         self.load_jira_issues()
 
@@ -238,7 +275,63 @@ class MainController(QObject):
 
         # The actual JQL to send to Jira (may be a combined version including filters)
         jql = send_jql if send_jql is not None else input_jql
+        
+        # Verifica se siamo online o offline
+        if not self.is_internet_available or not self.is_jira_available:
+            self._logger.info("Modalità offline: caricamento solo dei preferiti salvati localmente")
+            self.is_loading = False
+            self.view.jira_grid_view.show_loading(False)
+            
+            # In modalità offline, mostriamo solo i preferiti dal database locale
+            try:
+                # Ottieni tutte le chiavi preferite
+                favorite_keys = self.db_service.get_all_favorites()
+                
+                if not favorite_keys:
+                    self.view.jira_grid_view.show_error(
+                        "Modalità offline: nessun ticket preferito trovato.\n"
+                        "Quando la connessione sarà ripristinata, potrai caricare tutti i ticket."
+                    )
+                    self.all_results_loaded = True
+                    return
+                
+                # Carichiamo i dati di base per questi preferiti
+                offline_issues = []
+                for key in favorite_keys:
+                    # Costruiamo un oggetto simile a quello che restituirebbe Jira
+                    # ma con i dati minimi disponibili localmente
+                    issue_data = {
+                        'key': key,
+                        'fields': {
+                            'summary': f"{key} (dati offline)",
+                            'status': {'name': 'Unknown'},
+                            'timespent': 0  # Useremo i dati locali
+                        }
+                    }
+                    offline_issues.append(issue_data)
+                
+                # Chiamiamo direttamente il metodo di gestione dei dati caricati
+                self._on_data_loaded(offline_issues)
+                self.view.jira_grid_view.title_label.setText("Jira (Modalità Offline)")
+                self.all_results_loaded = True  # Previene il caricamento infinito
+                
+                # Aggiungiamo un messaggio informativo
+                self.view.jira_grid_view.show_info(
+                    "Modalità offline attiva: vengono mostrati solo i ticket preferiti salvati localmente.\n"
+                    "Quando la connessione sarà ripristinata, potrai caricare tutti i ticket."
+                )
+                
+                return
+            except Exception as e:
+                self._logger.error(f"Errore nel caricamento dei dati offline: {e}")
+                self.view.jira_grid_view.show_error(
+                    f"Errore nel caricamento dei dati offline: {str(e)}\n"
+                    "Riprova quando la connessione sarà disponibile."
+                )
+                self.is_loading = False
+                return
 
+        # Modalità online: carica i dati da Jira come di consueto
         # Create a dedicated thread for this load operation and keep references
         thread = QThread()
         worker = JiraWorker(self.jira_service, jql, self.start_at, favorite_keys=favorite_keys)
@@ -662,6 +755,11 @@ class MainController(QObject):
             from views.notes_manager_dialog import NotesManagerDialog
             notes_dialog = NotesManagerDialog(self.db_service, self.app_settings, parent=None)  # No parent for top-level
             
+            # Connect the signals
+            notes_dialog.all_notes_requested.connect(self._show_notes_grid_dialog)
+            notes_dialog.open_jira_detail_requested.connect(self._open_detail_from_key)
+            notes_dialog.start_timer_requested.connect(self._start_timer_from_notes)
+            
             # Ensure dialog is top-level, non-modal, and will not be closed when main is activated
             try:
                 notes_dialog.setWindowFlag(Qt.WindowType.Window, True)
@@ -682,6 +780,87 @@ class MainController(QObject):
             self._logger.error(f"Error opening notes manager dialog: {e}")
             import traceback
             self._logger.error(traceback.format_exc())
+            
+    def _show_notes_grid_dialog(self):
+        """Shows the grid of all notes."""
+        try:
+            from views.notes_grid_dialog import NotesGridDialog
+            grid_dialog = NotesGridDialog(self.db_service, parent=None)
+            
+            # Connect signals for opening Jira detail view and starting timer
+            grid_dialog.open_jira_detail_requested.connect(self._open_detail_from_key)
+            grid_dialog.start_timer_requested.connect(self._start_timer_from_notes)
+            
+            # Ensure dialog is top-level, non-modal, and will not be closed when main is activated
+            try:
+                grid_dialog.setWindowFlag(Qt.WindowType.Window, True)
+                grid_dialog.setModal(False)
+            except Exception:
+                pass
+            
+            # Track the dialog window
+            self._open_dialog_windows.append(grid_dialog)
+            grid_dialog.destroyed.connect(lambda: self._on_dialog_window_closed(grid_dialog))
+            
+            # Show the dialog now
+            grid_dialog.show()
+            grid_dialog.raise_()
+            grid_dialog.activateWindow()
+            
+        except Exception as e:
+            self._logger.error(f"Error opening notes grid dialog: {e}")
+            import traceback
+            self._logger.error(traceback.format_exc())
+            
+    def _open_detail_from_key(self, jira_key):
+        """Opens a detail view for a Jira issue identified by key."""
+        if not jira_key or not jira_key.strip():
+            return
+            
+        jira_key = jira_key.strip()
+        
+        # Check if a window for this issue is already open
+        if jira_key in self.open_detail_windows:
+            self.open_detail_windows[jira_key].activateWindow()
+            return
+            
+        # Create a new detail view
+        from views.jira_detail_view import JiraDetailView
+        from controllers.jira_detail_controller import JiraDetailController
+
+        detail_window = JiraDetailView(jira_key, parent=None)  # No parent for top-level
+        
+        # Ensure this widget is a top-level window (not an embedded child)
+        try:
+            detail_window.setWindowFlag(Qt.WindowType.Window, True)
+        except Exception:
+            pass
+            
+        detail_controller = JiraDetailController(
+            detail_window, 
+            self.jira_service, 
+            self.db_service,
+            jira_key
+        )
+        
+        # Store controller on the window to keep it alive
+        detail_window.controller = detail_controller 
+        
+        detail_controller._load_data()
+        self.open_detail_windows[jira_key] = detail_window
+        detail_window.destroyed.connect(lambda: self._on_detail_window_closed(jira_key))
+        detail_controller.window_closed.connect(self._on_detail_window_closed)
+        detail_controller.timer_started.connect(self._on_timer_started)
+        detail_controller.timer_stopped.connect(self._on_timer_stopped)
+        detail_controller.time_updated.connect(self._on_time_updated)
+        
+        # Adjust window flags for proper stacking
+        self._adjust_window_flags_for_detail(detail_window)
+        
+        # Show the window
+        detail_window.show()
+        detail_window.raise_()
+        detail_window.activateWindow()
         
     def _on_jql_selected_from_history(self, query):
         """Applies a JQL query selected from the history dialog."""
@@ -1034,18 +1213,14 @@ class MainController(QObject):
         detail_controller.timer_started.connect(self._on_timer_started)
         detail_controller.timer_stopped.connect(self._on_timer_stopped)
         detail_controller.time_updated.connect(self._on_time_updated)
-        try:
-            from services.ui_utils import apply_always_on_top
-            apply_always_on_top(detail_window, app_settings=self.app_settings)
-        except Exception:
-            pass
-
+        
+        # Adjust window flags for proper stacking
+        self._adjust_window_flags_for_detail(detail_window)
+        
+        # Show the window
         detail_window.show()
-        try:
-            from services.ui_utils import apply_always_on_top
-            apply_always_on_top(detail_window, app_settings=self.app_settings)
-        except Exception:
-            pass
+        detail_window.raise_()
+        detail_window.activateWindow()
 
 
     def _on_timer_started(self, started_key: str):
@@ -1066,6 +1241,78 @@ class MainController(QObject):
             self._active_timer_key = None
             self._active_timer_seconds = 0
             self._update_widget_display()
+            
+    def _on_timer_stopped_with_note(self, jira_key: str, seconds: int, note: str):
+        """Handle when a timer is stopped in the mini timer dialog."""
+        # Unset active timer
+        if jira_key == self._active_timer_key:
+            self._active_timer_key = None
+            self._active_timer_seconds = 0
+            self._update_widget_display()
+            
+        # Add the worklog entry if there is time tracked
+        if seconds > 0:
+            try:
+                from datetime import datetime, timedelta, timezone
+                from jira import JIRAError
+                
+                # Calculate start time based on now minus tracked seconds
+                end_time = datetime.now(timezone.utc)
+                start_time = end_time - timedelta(seconds=seconds)
+                
+                # Add worklog to database
+                self.db_service.add_local_worklog(
+                    jira_key=jira_key,
+                    start_time=start_time,
+                    duration_seconds=seconds,
+                    comment=note if note else None
+                )
+                
+                # Reset the timer in the database
+                self.db_service.reset_local_time(jira_key)
+                
+                # Verifica se il ticket è fittizio prima di aggiungerlo alla coda di sincronizzazione
+                is_fictional = False
+                if self.jira_service.is_connected():
+                    try:
+                        # Verifica se il ticket esiste su Jira
+                        self.jira_service.get_issue(jira_key)
+                    except JIRAError as e:
+                        # Se è un errore 4xx, consideriamo il ticket come fittizio
+                        if hasattr(e, 'status_code') and 400 <= e.status_code < 500:
+                            is_fictional = True
+                            self._logger.warning(f"Non sincronizzato worklog per ticket fittizio: {jira_key}")
+                
+                # Add to sync queue if auto_sync is enabled AND the ticket is not fictional
+                auto_sync = self.app_settings.get_setting("auto_sync", "false").lower() == "true"
+                if auto_sync and not is_fictional:
+                    import json
+                    payload = json.dumps({
+                        "jira_key": jira_key,
+                        "start_time": start_time.isoformat(),
+                        "seconds": seconds,
+                        "comment": note if note else ""
+                    })
+                    self.db_service.add_to_sync_queue("ADD_WORKLOG", payload)
+                    self._logger.debug(f"Worklog added to sync queue for {jira_key}")
+                elif is_fictional:
+                    # Aggiungiamo un tag alle note per indicare che il ticket è fittizio (se non è già specificato)
+                    fictional_tag = "[TICKET FITTIZIO]"
+                    final_note = note
+                    if not note or fictional_tag not in note:
+                        final_note = f"{fictional_tag} {note if note else ''}"
+                        
+                    # Aggiorniamo il commento del worklog locale con il tag
+                    self.db_service.update_local_worklog_comment(
+                        jira_key=jira_key, 
+                        start_time=start_time, 
+                        comment=final_note
+                    )
+                    self._logger.info(f"Worklog salvato localmente per ticket fittizio: {jira_key}")
+                    
+                self._logger.debug(f"Worklog added for {jira_key}: {seconds}s with note: {note} (fittizio: {is_fictional})")
+            except Exception as e:
+                self._logger.error(f"Error adding worklog: {e}")
 
     def _on_time_updated(self, jira_key: str, total_seconds: int):
         """Receives time updates from the active timer."""
@@ -1137,6 +1384,10 @@ class MainController(QObject):
         # Stop the sync timer
         if hasattr(self, 'sync_timer'):
             self.sync_timer.stop()
+        
+        # Stop network monitoring
+        if hasattr(self, 'network_service'):
+            self.network_service.stop_monitoring()
         
         # Hide the mini widget
         self.mini_widget_controller.hide()
@@ -1283,6 +1534,81 @@ class MainController(QObject):
             
             # Start the timer
             detail_controller.start_timer()
+            
+    def _start_timer_from_notes(self, jira_key: str):
+        """Starts a timer for a Jira issue selected from the notes manager using the mini timer dialog.
+        
+        This method will start a timer for any Jira key, even if it doesn't exist on the server.
+        This is useful for tracking time against fictional or future Jira tickets that are mentioned
+        in notes but don't yet exist in Jira.
+        """
+        # Prima verifichiamo se c'è già un timer attivo per questa issue
+        if jira_key == self._active_timer_key and jira_key in self.open_detail_windows:
+            # Mostra e attiva la finestra già esistente
+            self.open_detail_windows[jira_key].show()
+            self.open_detail_windows[jira_key].activateWindow()
+            return
+            
+        # Utilizziamo il nuovo MiniTimerController con la stessa interfaccia del mini widget
+        try:
+            from controllers.mini_timer_controller import MiniTimerController
+            from jira import JIRAError
+            
+            # Prima di avviare il timer, verifichiamo se il ticket esiste sul server
+            # ma solo se siamo connessi. Se non esiste, lo consideriamo un ticket fittizio.
+            is_fictional = False
+            try:
+                if self.jira_service.is_connected():
+                    try:
+                        # Tentiamo di recuperare i dettagli del ticket (genera JIRAError se non esiste)
+                        self.jira_service.get_issue(jira_key)
+                    except JIRAError as e:
+                        # Se otteniamo un 404 o altro errore client (4xx), 
+                        # il ticket non esiste sul server, ma lo gestiamo come fittizio
+                        if hasattr(e, 'status_code') and 400 <= e.status_code < 500:
+                            self._logger.warning(f"Timer avviato per ticket fittizio: {jira_key} (status: {e.status_code})")
+                            is_fictional = True
+                        else:
+                            # Errore server (5xx) o altro errore significativo
+                            raise e
+            except Exception as e:
+                # Log the error but continue - we'll just create a timer anyway
+                self._logger.warning(f"Impossibile verificare l'esistenza del ticket {jira_key}: {e}. Procedo comunque.")
+                
+            # Creiamo un controller per il mini timer
+            mini_timer_controller = MiniTimerController(jira_key, self.db_service)
+            
+            # Se il ticket è fittizio, aggiungiamo un avviso nella nota del timer
+            if is_fictional:
+                # Aggiungiamo un avviso che questo è un ticket fittizio
+                mini_timer_controller.view.set_note_hint("Ticket fittizio - non esiste su Jira")
+                mini_timer_controller.view.setWindowTitle(f"Timer: {jira_key} (Fittizio)")
+            
+            # Connessione dei segnali
+            mini_timer_controller.timer_started.connect(self._on_timer_started)
+            mini_timer_controller.timer_stopped.connect(self._on_timer_stopped_with_note)
+            
+            # Applichiamo le impostazioni di visualizzazione
+            try:
+                from services.ui_utils import apply_always_on_top
+                apply_always_on_top(mini_timer_controller.view, app_settings=self.app_settings)
+            except Exception as e:
+                self._logger.error(f"Error applying window flags: {e}")
+            
+            # Iniziamo il timer e mostriamo la finestra
+            mini_timer_controller.run()
+            
+            # Aggiungiamo alle finestre aperte
+            self.open_detail_windows[jira_key] = mini_timer_controller.view
+            self.open_detail_windows[jira_key].controller = mini_timer_controller
+            mini_timer_controller.view.destroyed.connect(lambda: self._on_detail_window_closed(jira_key))
+            
+            self._logger.debug(f"Mini timer started for {jira_key} from notes (fittizio: {is_fictional})")
+            
+        except Exception as e:
+            self._logger.error(f"Error starting mini timer from notes: {e}")
+            import traceback
+            self._logger.error(traceback.format_exc())
 
     def _play_active_timer(self):
         """Starts the timer for the active issue from the mini widget."""
@@ -1543,3 +1869,155 @@ class MainController(QObject):
         detail_controller.timer_stopped.connect(self._on_timer_stopped)
         detail_controller.time_updated.connect(self._on_time_updated)
         detail_window.show()
+        
+    # --- Network status handling methods ---
+    
+    def _on_internet_connection_changed(self, is_connected: bool):
+        """Handles changes in internet connection state."""
+        self.is_internet_available = is_connected
+        self._logger.info(f"Stato connessione internet cambiato: {'disponibile' if is_connected else 'non disponibile'}")
+        
+        # Update the UI indicator
+        self.view.update_network_status(self.is_internet_available, self.is_jira_available)
+        
+        if is_connected:
+            # If we have regained internet, check if we can connect to JIRA as well
+            if not self.is_jira_available:
+                self._try_reconnect_jira()
+        else:
+            # If internet is gone, JIRA is gone too
+            self.is_jira_available = False
+            self.view.update_network_status(False, False)
+            
+            # Show a brief message to inform the user
+            self._show_offline_notification("Connessione internet persa", 
+                "L'applicazione continuerà a funzionare in modalità offline.\n"
+                "I dati saranno salvati localmente e sincronizzati quando la connessione sarà ripristinata.")
+            
+    def _on_jira_connection_changed(self, is_connected: bool):
+        """Handles changes in JIRA connection state."""
+        old_state = self.is_jira_available
+        self.is_jira_available = is_connected
+        self._logger.info(f"Stato connessione JIRA cambiato: {'disponibile' if is_connected else 'non disponibile'}")
+        
+        # Update the UI indicator
+        self.view.update_network_status(self.is_internet_available, self.is_jira_available)
+        
+        # If JIRA just came back online
+        if is_connected and not old_state:
+            # Show a message
+            self._show_offline_notification("Connessione a JIRA ripristinata", 
+                "L'applicazione è ora in modalità online.\n"
+                "Le modifiche locali possono essere sincronizzate con il server.")
+            
+            # Try to sync pending operations if auto-sync is enabled
+            auto_sync = self.app_settings.get_setting("auto_sync", "false").lower() == "true"
+            if auto_sync:
+                # Trigger sync (this would normally happen periodically, but we trigger it immediately)
+                self._process_sync_queue()
+        
+        # If JIRA just went offline
+        elif not is_connected and old_state:
+            # Show a message
+            self._show_offline_notification("Connessione a JIRA persa", 
+                "L'applicazione continuerà a funzionare in modalità parzialmente offline.\n"
+                "I dati saranno salvati localmente e sincronizzati quando la connessione a JIRA sarà ripristinata.")
+    
+    def _try_reconnect_jira(self):
+        """Attempts to reconnect to JIRA."""
+        try:
+            # Recupera le credenziali
+            jira_url = self.app_settings.get_setting("JIRA_URL", "")
+            
+            # Recupera il PAT
+            from services.credential_service import CredentialService
+            cred_service = CredentialService()
+            pat = cred_service.get_pat(jira_url)
+            
+            if jira_url and pat:
+                # Tenta la riconnessione
+                self._logger.info(f"Tentativo di riconnessione a JIRA: {jira_url}")
+                self.jira_service.connect(jira_url, pat)
+                self.is_jira_available = True
+                self._logger.info("Riconnessione a JIRA riuscita")
+                
+                # Aggiorna l'indicatore
+                self.view.update_network_status(self.is_internet_available, self.is_jira_available)
+                
+                # Informo l'utente
+                self._show_offline_notification("Connessione a JIRA ripristinata", 
+                    "L'applicazione è tornata in modalità online.\n"
+                    "Le modifiche locali possono essere sincronizzate con il server.")
+                
+                return True
+        except Exception as e:
+            self._logger.warning(f"Tentativo di riconnessione a JIRA fallito: {e}")
+        
+        return False
+    
+    def _check_connection_manually(self):
+        """Triggered when the user requests a manual connection check."""
+        # Mostra un messaggio di attesa
+        self._logger.info("Verifica manuale della connessione richiesta")
+        
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            wait_msg = QMessageBox(self.view)
+            wait_msg.setWindowTitle("Verifica connessione")
+            wait_msg.setText("Verifica della connessione in corso...")
+            wait_msg.setStandardButtons(QMessageBox.StandardButton.NoButton)
+            wait_msg.show()
+            
+            # Esegue controllo della connessione
+            self.network_service.check_connection()
+            
+            # Chiudi il messaggio di attesa
+            wait_msg.close()
+            
+            # Mostra il risultato
+            result_msg = QMessageBox(self.view)
+            result_msg.setWindowTitle("Stato connessione")
+            
+            if self.is_internet_available and self.is_jira_available:
+                result_msg.setText("✅ Connessione a internet e JIRA disponibile")
+                result_msg.setIcon(QMessageBox.Icon.Information)
+            elif self.is_internet_available:
+                result_msg.setText("⚠️ Connessione a internet disponibile, ma JIRA non raggiungibile")
+                result_msg.setIcon(QMessageBox.Icon.Warning)
+                result_msg.setInformativeText("Possibili cause:\n- Server JIRA non disponibile\n- Problemi con le credenziali\n- Problemi di rete interni")
+            else:
+                result_msg.setText("❌ Nessuna connessione a internet")
+                result_msg.setIcon(QMessageBox.Icon.Critical)
+                result_msg.setInformativeText("Controlla la connessione di rete")
+            
+            result_msg.exec()
+            
+        except Exception as e:
+            self._logger.error(f"Errore durante la verifica manuale della connessione: {e}")
+            try:
+                wait_msg.close()
+            except Exception:
+                pass
+    
+    def _show_offline_notification(self, title, message):
+        """Shows a non-modal notification about network status changes."""
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            msg = QMessageBox(self.view)
+            msg.setWindowTitle(title)
+            msg.setText(message)
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+            
+            # Make it non-modal so it doesn't block the application
+            msg.setWindowModality(Qt.WindowModality.NonModal)
+            msg.show()
+        except Exception as e:
+            self._logger.error(f"Errore nel mostrare la notifica offline: {e}")
+    
+    def _process_sync_queue(self):
+        """Processes the sync queue when connection is restored."""
+        # TODO: This would normally be done by a sync worker
+        # For this implementation, we'll trigger it when connection is restored
+        # and if auto-sync is enabled
+        pass
