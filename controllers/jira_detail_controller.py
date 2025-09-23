@@ -27,6 +27,7 @@ class AttachmentDownloadWorker(QThread):
         self.attachment_data = attachment_data
         self.attachment_widget = attachment_widget
         self.is_cancelled = False
+        self.setObjectName(f"AttachmentDownload-{attachment_data.get('filename', 'unknown')}")
     
     def cancel(self):
         """Cancel the download."""
@@ -49,7 +50,7 @@ class AttachmentDownloadWorker(QThread):
             self.progress_updated.emit(self.attachment_widget, 0)
             
             # Get the attachment content with progress tracking
-            response = self.jira_service.jira._session.get(file_url, stream=True)
+            response = self.jira_service.jira._session.get(file_url, stream=True, timeout=30)
             response.raise_for_status()
             
             total_size = int(response.headers.get('content-length', 0))
@@ -81,7 +82,8 @@ class AttachmentDownloadWorker(QThread):
             self.download_finished.emit(self.attachment_widget, save_path)
             
         except Exception as e:
-            self.download_error.emit(self.attachment_widget, str(e))
+            if not self.is_cancelled:
+                self.download_error.emit(self.attachment_widget, str(e))
 
 
 class ThumbnailDownloadWorker(QThread):
@@ -96,6 +98,7 @@ class ThumbnailDownloadWorker(QThread):
         self.attachment_data = attachment_data
         self.attachment_widget = attachment_widget
         self.is_cancelled = False
+        self.setObjectName(f"ThumbnailDownload-{attachment_data.get('filename', 'unknown')}")
     
     def cancel(self):
         """Cancel the thumbnail download."""
@@ -115,7 +118,7 @@ class ThumbnailDownloadWorker(QThread):
                 return
             
             # Download the image
-            response = self.jira_service.jira._session.get(file_url, stream=True)
+            response = self.jira_service.jira._session.get(file_url, stream=True, timeout=30)
             response.raise_for_status()
             
             # Read image data
@@ -142,7 +145,8 @@ class ThumbnailDownloadWorker(QThread):
                 self.thumbnail_error.emit(self.attachment_widget, "Impossibile caricare l'immagine")
             
         except Exception as e:
-            self.thumbnail_error.emit(self.attachment_widget, str(e))
+            if not self.is_cancelled:
+                self.thumbnail_error.emit(self.attachment_widget, str(e))
 
 
 class IssueLinksLoaderWorker(QThread):
@@ -156,6 +160,7 @@ class IssueLinksLoaderWorker(QThread):
         self.jira_service = jira_service
         self.issue_key = issue_key
         self.is_cancelled = False
+        self.setObjectName(f"IssueLinksLoader-{issue_key}")
     
     def cancel(self):
         """Cancel the links loading."""
@@ -354,6 +359,11 @@ class JiraDetailController(QObject):
         self._links_loader_worker = None
         self._active_note_editor = None
         self._current_note_title = None # Track the title of the active note
+        
+        # Queues for pending downloads
+        self._pending_thumbnail_widgets = []
+        self._pending_download_widgets = []
+        self._max_concurrent_downloads = 3
         
         self._connect_signals()
         self._setup_autosave_timer()  # Setup the timer once
@@ -559,8 +569,12 @@ class JiraDetailController(QObject):
         self.view.download_selected_btn.setEnabled(True)
         self.view.download_all_btn.setEnabled(True)
         
-        # Create widgets for each attachment and start downloads/thumbnails
-        for attachment in self._attachments_data:
+        # Limit concurrent downloads to prevent too many threads
+        self._pending_thumbnail_widgets = []
+        self._pending_download_widgets = []
+        
+        # Create widgets for each attachment and start downloads/thumbnails with limit
+        for i, attachment in enumerate(self._attachments_data):
             filename = attachment.get('filename', 'Unknown')
             size_kb = attachment.get('size', 0) / 1024
             
@@ -579,11 +593,21 @@ class JiraDetailController(QObject):
             image_extensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp']
             
             if file_extension in image_extensions:
-                # Start thumbnail download for images
-                self._start_thumbnail_download(attachment_widget)
+                # Start thumbnail download for images (limit concurrent)
+                if len(self._thumbnail_workers) < self._max_concurrent_downloads:
+                    self._start_thumbnail_download(attachment_widget)
+                else:
+                    # Queue for later
+                    self._pending_thumbnail_widgets.append(attachment_widget)
+                    attachment_widget.thumbnail_label.setText("🖼️")
+                    attachment_widget.thumbnail_label.setStyleSheet("border: 1px solid #ccc; background-color: #f8f8f8; font-size: 24px;")
             else:
-                # Start automatic download for non-image files
-                self._start_attachment_download(attachment_widget)
+                # Start automatic download for non-image files (limit concurrent)
+                if len(self._download_workers) < self._max_concurrent_downloads:
+                    self._start_attachment_download(attachment_widget)
+                else:
+                    # Queue for later
+                    self._pending_download_widgets.append(attachment_widget)
 
     def _upload_attachment(self):
         """Opens a file dialog to select a file and adds it to the sync queue."""
@@ -617,6 +641,10 @@ class JiraDetailController(QObject):
             worker.wait()
         
         self._thumbnail_workers.clear()
+        
+        # Clear pending queues
+        self._pending_thumbnail_widgets.clear()
+        self._pending_download_widgets.clear()
         
         # Clear all widgets from the layout
         while self.view.attachments_layout.count():
@@ -1079,41 +1107,54 @@ class JiraDetailController(QObject):
         self._save_current_note() # Ensure last active note is saved
         
         # Cancel all ongoing downloads
-        # Debug: log worker states before cancelling
-        try:
-            for w in list(self._download_workers):
-                try:
-                    _logger.debug("Download worker state before cancel: worker=%s running=%s", type(w).__name__, getattr(w, 'isRunning', lambda: False)())
-                except Exception:
-                    _logger.debug("Download worker state before cancel: %s", str(w))
-        except Exception:
-            pass
-        for worker in self._download_workers:
-            worker.cancel()
+        _logger.debug("Cancelling download workers...")
+        for worker in self._download_workers[:]:  # Copy list to avoid modification during iteration
+            try:
+                worker.cancel()
+            except Exception as e:
+                _logger.debug(f"Error cancelling download worker: {e}")
         
         # Cancel all thumbnail downloads
-        try:
-            for w in list(self._thumbnail_workers):
-                try:
-                    _logger.debug("Thumbnail worker state before cancel: worker=%s running=%s", type(w).__name__, getattr(w, 'isRunning', lambda: False)())
-                except Exception:
-                    _logger.debug("Thumbnail worker state before cancel: %s", str(w))
-        except Exception:
-            pass
-        for worker in self._thumbnail_workers:
-            worker.cancel()
+        _logger.debug("Cancelling thumbnail workers...")
+        for worker in self._thumbnail_workers[:]:  # Copy list to avoid modification during iteration
+            try:
+                worker.cancel()
+            except Exception as e:
+                _logger.debug(f"Error cancelling thumbnail worker: {e}")
         
         # Cancel links loader
         if self._links_loader_worker:
-            self._links_loader_worker.cancel()
-            self._links_loader_worker.wait()
+            _logger.debug("Cancelling links loader worker...")
+            try:
+                self._links_loader_worker.cancel()
+            except Exception as e:
+                _logger.debug(f"Error cancelling links loader worker: {e}")
         
-        # Wait for all workers to finish
-        for worker in self._download_workers:
-            worker.wait()
+        # Wait for all workers to finish with timeout
+        _logger.debug("Waiting for workers to finish...")
+        from PyQt6.QtCore import QDeadlineTimer
+        timeout = QDeadlineTimer(5000)  # 5 second timeout
         
-        for worker in self._thumbnail_workers:
-            worker.wait()
+        # Wait for download workers
+        for worker in self._download_workers[:]:
+            if worker.isRunning() and not worker.wait(timeout):
+                _logger.warning(f"Download worker did not finish within timeout, terminating: {type(worker).__name__}")
+                worker.terminate()
+                worker.wait(1000)  # Give it 1 more second after terminate
+        
+        # Wait for thumbnail workers
+        for worker in self._thumbnail_workers[:]:
+            if worker.isRunning() and not worker.wait(timeout):
+                _logger.warning(f"Thumbnail worker did not finish within timeout, terminating: {type(worker).__name__}")
+                worker.terminate()
+                worker.wait(1000)
+        
+        # Wait for links loader
+        if self._links_loader_worker and self._links_loader_worker.isRunning():
+            if not self._links_loader_worker.wait(timeout):
+                _logger.warning("Links loader worker did not finish within timeout, terminating")
+                self._links_loader_worker.terminate()
+                self._links_loader_worker.wait(1000)
         
         self.pause_timer()
         
@@ -1419,6 +1460,9 @@ class JiraDetailController(QObject):
             if worker.attachment_widget == attachment_widget:
                 self._thumbnail_workers.remove(worker)
                 break
+        
+        # Start next pending thumbnail download
+        self._start_next_pending_thumbnail()
     
     @pyqtSlot(object, str)
     def _on_thumbnail_error(self, attachment_widget, error_message):
@@ -1434,6 +1478,9 @@ class JiraDetailController(QObject):
             if worker.attachment_widget == attachment_widget:
                 self._thumbnail_workers.remove(worker)
                 break
+        
+        # Start next pending thumbnail download
+        self._start_next_pending_thumbnail()
     
     def _download_single_attachment(self, attachment_widget):
         """Download a single attachment."""
@@ -1493,6 +1540,9 @@ class JiraDetailController(QObject):
             if worker.attachment_widget == attachment_widget:
                 self._download_workers.remove(worker)
                 break
+        
+        # Start next pending download
+        self._start_next_pending_download()
     
     @pyqtSlot(object, str)
     def _on_download_error(self, attachment_widget, error_message):
@@ -1514,6 +1564,9 @@ class JiraDetailController(QObject):
             if worker.attachment_widget == attachment_widget:
                 self._download_workers.remove(worker)
                 break
+        
+        # Start next pending download
+        self._start_next_pending_download()
     
     def _reset_attachment_widget(self, attachment_widget):
         """Reset an attachment widget to initial state."""
@@ -1644,12 +1697,17 @@ class JiraDetailController(QObject):
             if child_data.get('children'):
                 self._add_tree_children(child_item, child_data['children'])
 
-    def _format_time(self, total_seconds):
-        """Formats the time in HH:MM:SS."""
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        seconds = total_seconds % 60
-        return f"{hours:02}:{minutes:02}:{seconds:02}"
+    def _start_next_pending_thumbnail(self):
+        """Start the next pending thumbnail download if available."""
+        if self._pending_thumbnail_widgets and len(self._thumbnail_workers) < self._max_concurrent_downloads:
+            widget = self._pending_thumbnail_widgets.pop(0)
+            self._start_thumbnail_download(widget)
+    
+    def _start_next_pending_download(self):
+        """Start the next pending download if available."""
+        if self._pending_download_widgets and len(self._download_workers) < self._max_concurrent_downloads:
+            widget = self._pending_download_widgets.pop(0)
+            self._start_attachment_download(widget)
     
     def _on_time_history_cell_changed(self, row, column):
         """Handles inline editing of comment and duration in the time history table."""
@@ -1674,5 +1732,12 @@ class JiraDetailController(QObject):
                 minutes = int(match.group(2))
                 new_duration = hours * 3600 + minutes * 60
                 self.db_service.update_worklog_duration(log_id, new_duration)
+
+    def _format_time(self, total_seconds):
+        """Formats the time in HH:MM:SS."""
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        return f"{hours:02}:{minutes:02}:{seconds:02}"
 
 
