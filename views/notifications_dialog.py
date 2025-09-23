@@ -152,15 +152,15 @@ class NotificationsDialog(QDialog):
             # Mark as read button
             if not sub['is_read']:
                 read_btn = QPushButton()
-                read_btn.setIcon(FluentIcon.ACCEPT_MEDIUM.icon())
+                read_btn.setIcon(FluentIcon.ACCEPT_MEDIUM)
                 read_btn.setToolTip("Segna come letto")
                 read_btn.setFixedSize(24, 24)
                 read_btn.clicked.connect(lambda _, key=sub['issue_key']: self._mark_as_read(key))
                 actions_layout.addWidget(read_btn)
-            
+                
             # Delete subscription button
             delete_btn = QPushButton()
-            delete_btn.setIcon(FluentIcon.DELETE.icon())
+            delete_btn.setIcon(FluentIcon.DELETE)
             delete_btn.setToolTip("Cancella iscrizione")
             delete_btn.setFixedSize(24, 24)
             delete_btn.clicked.connect(lambda _, key=sub['issue_key']: self._delete_subscription(key))
@@ -168,7 +168,7 @@ class NotificationsDialog(QDialog):
             
             # Open in browser button
             open_btn = QPushButton()
-            open_btn.setIcon(FluentIcon.LINK.icon())
+            open_btn.setIcon(FluentIcon.LINK)
             open_btn.setToolTip("Apri in browser")
             open_btn.setFixedSize(24, 24)
             open_btn.clicked.connect(lambda _, key=sub['issue_key']: self._open_in_browser(key))
@@ -176,13 +176,11 @@ class NotificationsDialog(QDialog):
             
             # Open detail button
             detail_btn = QPushButton()
-            detail_btn.setIcon(FluentIcon.INFO.icon())
+            detail_btn.setIcon(FluentIcon.INFO)
             detail_btn.setToolTip("Apri dettaglio")
             detail_btn.setFixedSize(24, 24)
             detail_btn.clicked.connect(lambda _, key=sub['issue_key']: self._open_issue_detail(key))
-            actions_layout.addWidget(detail_btn)
-            
-            # Add layout to table
+            actions_layout.addWidget(detail_btn)            # Add layout to table
             actions_widget = QWidget()
             actions_widget.setLayout(actions_layout)
             self.table.setCellWidget(row, 4, actions_widget)

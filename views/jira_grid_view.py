@@ -107,7 +107,7 @@ class JiraGridView(QWidget):
         # Loading spinner overlay
         self.loading_overlay = QFrame(self)
         self.loading_overlay.setFrameShape(QFrame.Shape.StyledPanel)
-        self.loading_overlay.setStyleSheet("background-color: rgba(255, 255, 255, 180);")
+        self.loading_overlay.setStyleSheet("background-color: rgba(255, 255, 255, 220); border: 2px solid #007ACC; border-radius: 8px;")
         self.loading_overlay.setVisible(False)
         
         loading_layout = QVBoxLayout(self.loading_overlay)
@@ -128,9 +128,9 @@ class JiraGridView(QWidget):
         self.animation_timer.timeout.connect(self._update_spinner_animation)
         self.animation_counter = 0
         
-        self.status_label = QLabel("Caricamento dati in corso...")
+        self.status_label = QLabel("Loading...")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #007ACC;")
+        self.status_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #007ACC; margin: 10px;")
         loading_layout.addWidget(self.status_label)
         
         # Error message label
@@ -157,17 +157,41 @@ class JiraGridView(QWidget):
         if is_loading:
             # Start the loading animation
             self.animation_timer.start(200)  # Update every 200ms
-            self.status_label.setText("Caricamento dati in corso...")
+            self.status_label.setText("Loading...")
             self.error_label.setVisible(False)
             
             # Position the overlay over the table
             self.loading_overlay.setGeometry(self.table.geometry())
             self.loading_overlay.raise_()  # Bring to front
             self.loading_overlay.setVisible(True)
+            
+            # Disable controls during loading
+            self._set_controls_enabled(False)
         else:
             # Stop the loading animation and hide the overlay
             self.animation_timer.stop()
             self.loading_overlay.setVisible(False)
+            
+            # Re-enable controls after loading
+            self._set_controls_enabled(True)
+
+    def _set_controls_enabled(self, enabled):
+        """Enable or disable controls during loading."""
+        # Only disable controls that are directly related to Jira data loading
+        # Leave navigation and other UI elements enabled
+        
+        # Keep search box enabled - users should be able to filter existing data
+        self.search_box.setEnabled(True)
+        
+        # Keep JQL combo and apply button enabled - users should be able to change queries
+        self.jql_combo.setEnabled(True)
+        self.apply_jql_btn.setEnabled(True)
+        
+        # Keep favorites button enabled - users should be able to toggle favorites
+        self.favorites_btn.setEnabled(True)
+        
+        # Keep notifications button enabled - users should access notifications during loading
+        self.notifications_btn.setEnabled(True)
 
     def show_error(self, message):
         """Displays an error message using Fluent InfoBar and in the loading overlay."""

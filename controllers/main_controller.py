@@ -192,10 +192,11 @@ class MainController(QObject):
         if favorites_filter_enabled:
             self._on_favorites_toggled(True)
         
-        self.load_jira_issues()
-        
         # Initialize history view
         self.history_controller.load_history()
+        
+        # Start Jira issues loading asynchronously
+        self.load_jira_issues()
 
     def load_jira_issues(self, append=False, favorite_keys: list[str] | None = None, custom_jql: str | None = None, send_jql: str | None = None):
         """

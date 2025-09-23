@@ -335,6 +335,47 @@ class IssueLinksLoaderWorker(QThread):
             return []
 
 
+class IssueDetailLoaderWorker(QThread):
+    """Worker thread for loading issue details asynchronously."""
+    
+    issue_loaded = pyqtSignal(dict)  # Issue data dictionary
+    issue_error = pyqtSignal(str)    # Error message
+    
+    def __init__(self, jira_service, issue_key):
+        super().__init__()
+        self.jira_service = jira_service
+        self.issue_key = issue_key
+        self.is_cancelled = False
+        self.setObjectName(f"IssueDetailLoader-{issue_key}")
+    
+    def cancel(self):
+        """Cancel the issue loading."""
+        self.is_cancelled = True
+    
+    def run(self):
+        """Load issue details."""
+        try:
+            if self.is_cancelled:
+                return
+            
+            # Load issue data from Jira
+            issue_data = self.jira_service.get_issue(self.issue_key)
+            
+            if self.is_cancelled:
+                return
+            
+            if issue_data is None:
+                self.issue_error.emit(f"Failed to load issue data for {self.issue_key}")
+                return
+            
+            if not self.is_cancelled:
+                self.issue_loaded.emit(issue_data)
+            
+        except Exception as e:
+            if not self.is_cancelled:
+                self.issue_error.emit(str(e))
+
+
 class JiraDetailController(QObject):
     """
     Controller to manage the logic for the JiraDetailView.
@@ -357,6 +398,7 @@ class JiraDetailController(QObject):
         self._download_workers = []
         self._thumbnail_workers = []
         self._links_loader_worker = None
+        self._issue_detail_loader_worker = None
         self._active_note_editor = None
         self._current_note_title = None # Track the title of the active note
         
@@ -407,29 +449,36 @@ class JiraDetailController(QObject):
 
     def _load_data(self):
         """
-        Loads all necessary data from Jira and the local DB.
-        This should be run in a background thread in a real app.
+        Loads all necessary data from Jira and the local DB asynchronously.
         """
         try:
             # Record this view in history
             self.db_service.add_view_history(self.jira_key)
             
-            # 1. Fetch issue data from Jira
-            self._issue_data = self.jira_service.get_issue(self.jira_key)
+            # Show loading indicator
+            self.view.details_browser.setHtml("<p><i>Loading issue details...</i></p>")
+            self.view.comments_browser.setHtml("<p><i>Loading comments...</i></p>")
             
-            # Check if we successfully got issue data
-            if self._issue_data is None:
-                raise Exception(f"Failed to load issue data for {self.jira_key}")
+            # Clear existing attachments and show loading
+            self._clear_attachment_widgets()
+            loading_label = QLabel("Loading attachments...")
+            loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.view.attachments_layout.addWidget(loading_label)
             
-            # 2. Populate the view with the data
-            self._populate_details()
-            self._populate_comments()
-            self._populate_attachments()
+            # Cancel any existing issue detail loader
+            if self._issue_detail_loader_worker:
+                self._issue_detail_loader_worker.cancel()
+                self._issue_detail_loader_worker.wait()
+            
+            # Start async issue detail loading
+            self._issue_detail_loader_worker = IssueDetailLoaderWorker(self.jira_service, self.jira_key)
+            self._issue_detail_loader_worker.issue_loaded.connect(self._on_issue_loaded)
+            self._issue_detail_loader_worker.issue_error.connect(self._on_issue_error)
+            self._issue_detail_loader_worker.start()
+            
+            # Load other data that doesn't depend on issue details
             self._populate_annotations()
-            self._start_async_links_loading()  # Start async loading of issue links
             self._load_time_history()
-            
-            # 3. Update notification subscription button
             self._update_notification_button()
 
         except Exception as e:
@@ -1130,6 +1179,14 @@ class JiraDetailController(QObject):
             except Exception as e:
                 _logger.debug(f"Error cancelling links loader worker: {e}")
         
+        # Cancel issue detail loader
+        if self._issue_detail_loader_worker:
+            _logger.debug("Cancelling issue detail loader worker...")
+            try:
+                self._issue_detail_loader_worker.cancel()
+            except Exception as e:
+                _logger.debug(f"Error cancelling issue detail loader worker: {e}")
+        
         # Wait for all workers to finish with timeout
         _logger.debug("Waiting for workers to finish...")
         from PyQt6.QtCore import QDeadlineTimer
@@ -1155,6 +1212,13 @@ class JiraDetailController(QObject):
                 _logger.warning("Links loader worker did not finish within timeout, terminating")
                 self._links_loader_worker.terminate()
                 self._links_loader_worker.wait(1000)
+        
+        # Wait for issue detail loader
+        if self._issue_detail_loader_worker and self._issue_detail_loader_worker.isRunning():
+            if not self._issue_detail_loader_worker.wait(timeout):
+                _logger.warning("Issue detail loader worker did not finish within timeout, terminating")
+                self._issue_detail_loader_worker.terminate()
+                self._issue_detail_loader_worker.wait(1000)
         
         self.pause_timer()
         
@@ -1709,6 +1773,36 @@ class JiraDetailController(QObject):
             widget = self._pending_download_widgets.pop(0)
             self._start_attachment_download(widget)
     
+    def _on_issue_loaded(self, issue_data):
+        """Handle successful loading of issue details."""
+        try:
+            # Store the issue data
+            self._issue_data = issue_data
+            
+            # Populate the view with the data
+            self._populate_details()
+            self._populate_comments()
+            self._populate_attachments()
+            self._start_async_links_loading()  # Start async loading of issue links
+            
+        except Exception as e:
+            print(f"Error populating issue data: {e}")
+            self.view.details_browser.setText(f"<b>Error populating issue data:</b><br>{e}")
+    
+    @pyqtSlot(str)
+    def _on_issue_error(self, error_message):
+        """Handle error loading issue details."""
+        self.view.details_browser.setText(f"<b>Error loading issue data:</b><br>{error_message}")
+        self.view.comments_browser.setText(f"<b>Error loading comments:</b><br>{error_message}")
+        
+        # Clear loading indicators from attachments
+        self._clear_attachment_widgets()
+        error_label = QLabel(f"Error loading attachments: {error_message}")
+        error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.view.attachments_layout.addWidget(error_label)
+        
+        print(f"Error in IssueDetailLoaderWorker: {error_message}")
+
     def _on_time_history_cell_changed(self, row, column):
         """Handles inline editing of comment and duration in the time history table."""
         table = self.view.time_history_table

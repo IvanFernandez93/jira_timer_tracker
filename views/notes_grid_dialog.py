@@ -1,4 +1,4 @@
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QWidget, QLabel, QDialog,
     QTableWidget, QTableWidgetItem, QAbstractScrollArea, QHeaderView,
@@ -9,12 +9,45 @@ from qfluentwidgets import (
     PushButton, SearchLineEdit, FluentIcon as FIF
 )
 
+class NotesLoaderWorker(QThread):
+    """Worker thread for loading notes asynchronously."""
+    
+    notes_loaded = pyqtSignal(list)  # List of note tuples (jira_key, title, updated_at)
+    notes_error = pyqtSignal(str)    # Error message
+    
+    def __init__(self, db_service):
+        super().__init__()
+        self.db_service = db_service
+        self.is_cancelled = False
+        self.setObjectName("NotesLoaderWorker")
+    
+    def cancel(self):
+        """Cancel the notes loading."""
+        self.is_cancelled = True
+    
+    def run(self):
+        """Load all notes from the database."""
+        try:
+            if self.is_cancelled:
+                return
+            
+            # Load notes from database
+            notes = self.db_service.get_all_annotations()
+            
+            if not self.is_cancelled:
+                self.notes_loaded.emit(notes)
+            
+        except Exception as e:
+            if not self.is_cancelled:
+                self.notes_error.emit(str(e))
+
 class NotesGridDialog(QDialog):
     """Dialog for displaying all notes in a grid with Jira key, note title, and update date."""
 
     def __init__(self, db_service, parent=None):
         super().__init__(parent)
         self.db_service = db_service
+        self.notes_loader_worker = None
         self.setWindowTitle("Tutte le Note")
         self.resize(1000, 600)
 
@@ -78,15 +111,45 @@ class NotesGridDialog(QDialog):
         # Add button box to layout
         self.main_layout.addWidget(self.button_box)
 
-        # Load initial data
-        self.load_notes()
+        # Start async loading
+        self._start_async_notes_loading()
 
-    def load_notes(self):
-        """Load all notes from the database."""
+    def _start_async_notes_loading(self):
+        """Start asynchronous loading of notes with loading indicator."""
+        # Show loading indicator
+        self.table.setRowCount(0)
+        self.table.setEnabled(False)
+        self.refresh_btn.setEnabled(False)
+        self.search_box.setEnabled(False)
+        
+        # Add loading row
+        self.table.insertRow(0)
+        loading_item = QTableWidgetItem("Caricamento note...")
+        loading_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table.setItem(0, 0, loading_item)
+        self.table.setSpan(0, 0, 1, 3)  # Span across all columns
+        
+        # Cancel any existing loader
+        if self.notes_loader_worker:
+            self.notes_loader_worker.cancel()
+            self.notes_loader_worker.wait()
+        
+        # Start new loader
+        self.notes_loader_worker = NotesLoaderWorker(self.db_service)
+        self.notes_loader_worker.notes_loaded.connect(self._on_notes_loaded)
+        self.notes_loader_worker.notes_error.connect(self._on_notes_error)
+        self.notes_loader_worker.start()
+
+    def _on_notes_loaded(self, notes):
+        """Handle successful loading of notes."""
         try:
+            # Clear loading indicator
+            self.table.clearContents()
             self.table.setRowCount(0)
-            notes = self.db_service.get_all_annotations()
-
+            self.table.setEnabled(True)
+            self.refresh_btn.setEnabled(True)
+            self.search_box.setEnabled(True)
+            
             if not notes:
                 self.show_info("Nessuna nota trovata.")
                 return
@@ -118,7 +181,26 @@ class NotesGridDialog(QDialog):
             self.hide_status()
 
         except Exception as e:
-            self.show_error(f"Errore nel caricamento delle note: {str(e)}")
+            self._on_notes_error(f"Errore nella costruzione della tabella: {str(e)}")
+
+    def _on_notes_error(self, error_message):
+        """Handle error loading notes."""
+        self.table.clearContents()
+        self.table.setRowCount(0)
+        self.table.setEnabled(True)
+        self.refresh_btn.setEnabled(True)
+        self.search_box.setEnabled(True)
+        
+        # Add error row
+        self.table.insertRow(0)
+        error_item = QTableWidgetItem(f"Errore: {error_message}")
+        error_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table.setItem(0, 0, error_item)
+        self.table.setSpan(0, 0, 1, 3)  # Span across all columns
+
+    def load_notes(self):
+        """Start async loading of notes."""
+        self._start_async_notes_loading()
 
     def _filter_notes(self, text: str):
         """Filter notes based on search text."""
@@ -147,6 +229,18 @@ class NotesGridDialog(QDialog):
     def hide_status(self):
         """Hides the status message."""
         self.status_label.setVisible(False)
+
+    def closeEvent(self, event):
+        """Handle dialog closing by cancelling any active workers."""
+        # Cancel notes loader if active
+        if self.notes_loader_worker:
+            self.notes_loader_worker.cancel()
+            # Wait briefly for the worker to finish
+            if not self.notes_loader_worker.wait(3000):  # 3 second timeout
+                self.notes_loader_worker.terminate()
+                self.notes_loader_worker.wait(1000)
+        
+        super().closeEvent(event)
 
     def showEvent(self, event):
         try:
