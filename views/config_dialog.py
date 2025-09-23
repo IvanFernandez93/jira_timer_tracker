@@ -179,6 +179,15 @@ class ConfigDialog(QDialog):
         always_layout.addStretch()
         layout.addLayout(always_layout)
         
+        # Mini widget option
+        mini_widget_layout = QHBoxLayout()
+        mini_widget_layout.addWidget(BodyLabel("Mostra mini widget quando minimizzato:"))
+        self.mini_widget_switch = SwitchButton("Abilita mini widget")
+        self.mini_widget_switch.setToolTip("Se attivato, mostra un piccolo widget di controllo quando la finestra principale è minimizzata")
+        mini_widget_layout.addWidget(self.mini_widget_switch)
+        mini_widget_layout.addStretch()
+        layout.addLayout(mini_widget_layout)
+        
     def _setup_sync_tab(self):
         """Setup the synchronization tab with auto-sync settings."""
         layout = QVBoxLayout(self.sync_tab)
@@ -353,6 +362,7 @@ class ConfigDialog(QDialog):
             "notification_unread_color": self._unread_color,
             "notification_read_color": self._read_color,
             "always_on_top": self.get_always_on_top(),
+            "mini_widget_enabled": self.get_mini_widget_enabled(),
         }
 
     def _open_column_config(self):
@@ -430,6 +440,19 @@ class ConfigDialog(QDialog):
             return bool(self.always_on_top_switch.isChecked())
         except Exception:
             return False
+
+    def set_mini_widget_enabled(self, enabled: bool):
+        """Set the local switch state for mini widget enabled UI element."""
+        try:
+            self.mini_widget_switch.setChecked(bool(enabled))
+        except Exception:
+            pass
+
+    def get_mini_widget_enabled(self) -> bool:
+        try:
+            return bool(self.mini_widget_switch.isChecked())
+        except Exception:
+            return True  # Default to enabled
 
     def show_error(self, message):
         self.error_label.setText(message)

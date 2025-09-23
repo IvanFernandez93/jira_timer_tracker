@@ -990,25 +990,28 @@ class MainController(QObject):
     def _on_window_state_changed(self, state):
         """Shows or hides the mini widget when the main window is minimized/restored."""
         if state == Qt.WindowState.WindowMinimized:
-            # Always show the mini widget when window is minimized (as per requirements)
-            try:
-                screen = QApplication.primaryScreen()
-                if screen is not None:
-                    if not self.mini_widget_view.isVisible():
-                        self.mini_widget_controller.show(screen)
-                else:
+            # Check if mini widget is enabled in settings
+            mini_widget_enabled = self.app_settings.get_setting("mini_widget_enabled", "true").lower() == "true"
+            if mini_widget_enabled:
+                # Show the mini widget when window is minimized (as per requirements)
+                try:
+                    screen = QApplication.primaryScreen()
+                    if screen is not None:
+                        if not self.mini_widget_view.isVisible():
+                            self.mini_widget_controller.show(screen)
+                    else:
+                        try:
+                            self._logger.debug("Primary screen not available; skipping mini widget show")
+                        except Exception:
+                            pass
+                except Exception:
                     try:
-                        self._logger.debug("Primary screen not available; skipping mini widget show")
+                        self._logger.exception('Error while accessing primary screen')
                     except Exception:
                         pass
-            except Exception:
-                try:
-                    self._logger.exception('Error while accessing primary screen')
-                except Exception:
-                    pass
 
-            # Update display immediately
-            self._update_widget_display()
+                # Update display immediately
+                self._update_widget_display()
         else:
             self.mini_widget_controller.hide()
 

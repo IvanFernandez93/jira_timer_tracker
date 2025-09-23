@@ -61,6 +61,13 @@ class ConfigController:
         except Exception:
             pass
         
+        # Set mini widget enabled state
+        mini_widget_enabled = self.app_settings.get_setting("mini_widget_enabled", "true").lower() == "true"
+        try:
+            self.view.set_mini_widget_enabled(mini_widget_enabled)
+        except Exception:
+            pass
+        
         # Set logging checkboxes based on saved settings
         self.view.log_info_checkbox.setChecked(self.app_settings.get_setting("log_info", "true").lower() == "true")
         self.view.log_debug_checkbox.setChecked(self.app_settings.get_setting("log_debug", "false").lower() == "true")
@@ -84,6 +91,7 @@ class ConfigController:
         notification_unread_color = config.get("notification_unread_color", "#FF6B6B")
         notification_read_color = config.get("notification_read_color", "#FFD93D")
         always_on_top = config.get("always_on_top", False)
+        mini_widget_enabled = config.get("mini_widget_enabled", True)
 
         save_button = self.view.button_box.button(QDialogButtonBox.StandardButton.Save)
         save_button.setEnabled(False)
@@ -126,6 +134,9 @@ class ConfigController:
             self.app_settings.set_setting("log_warning", str(log_warning).lower())
             # Save always-on-top setting
             self.app_settings.set_setting("always_on_top", str(bool(always_on_top)).lower())
+            
+            # Save mini widget enabled setting
+            self.app_settings.set_setting("mini_widget_enabled", str(bool(mini_widget_enabled)).lower())
             
             # Save notification colors
             self.app_settings.set_setting("notification_unread_color", notification_unread_color)
