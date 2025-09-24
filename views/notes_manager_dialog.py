@@ -545,7 +545,8 @@ class NotesManagerDialog(QDialog):
             jira_key = self.notes_table.item(row, 1).text().strip()
             if jira_key:
                 # Se la cella contiene una chiave Jira valida, offri la possibilità di aprire il dettaglio o avviare il timer
-                from PyQt6.QtWidgets import QMenu, QCursor
+                from PyQt6.QtWidgets import QMenu
+                from PyQt6.QtGui import QCursor
                 menu = QMenu(self)
                 open_detail_action = menu.addAction("Apri dettaglio")
                 open_detail_action.setIcon(QIcon(FIF.LINK.path))

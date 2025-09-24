@@ -21,6 +21,8 @@ class PriorityConfigController(QObject):
                 success = self.jira_service.update_issue_priority(jira_key, new_priority)
                 if success:
                     self.logger.info(f"Priority updated in Jira for {jira_key}: {new_priority}")
+                    # Mark as synced and remove from local overrides
+                    self.db_service.mark_priority_update_synced(jira_key)
                     self.priority_updated.emit(jira_key, new_priority)
                     return True
                 else:
@@ -29,7 +31,9 @@ class PriorityConfigController(QObject):
                 self.logger.warning("Cannot update priority: Jira is not connected")
                 
             # If Jira update failed or we're offline, store locally for sync later
-            self.db_service.store_priority_update(jira_key, new_priority)
+            # Try to get priority ID from name
+            priority_id = self._get_priority_id_for_name(new_priority)
+            self.db_service.set_local_priority(jira_key, priority_id, new_priority)
             self.logger.info(f"Priority update stored locally for {jira_key}: {new_priority}")
             self.priority_updated.emit(jira_key, new_priority)
             return True
@@ -37,6 +41,17 @@ class PriorityConfigController(QObject):
         except Exception as e:
             self.logger.error(f"Error updating priority: {str(e)}")
             return False
+    
+    def _get_priority_id_for_name(self, priority_name: str) -> str:
+        """Get the priority ID for a given priority name."""
+        priority_map = {
+            "Highest": "1",
+            "High": "2", 
+            "Medium": "3",
+            "Low": "4",
+            "Lowest": "5"
+        }
+        return priority_map.get(priority_name, priority_name)
     
     def get_available_priorities(self):
         """Get list of available priorities from Jira."""

@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QAbstractItemView, QHeaderView, QLabel, QTableWidgetItem, QFrame, QComboBox
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QMovie
 from qfluentwidgets import (
     SearchLineEdit, TableWidget, FluentIcon as FIF, 
@@ -12,6 +12,9 @@ class JiraGridView(QWidget):
     A view widget that displays Jira issues in a searchable and sortable table.
     Fulfills requirements 2.3.1, 2.3.2.
     """
+    # Signal emitted when sorting is completed and favorite buttons need to be reconnected
+    sorting_completed = pyqtSignal()
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("jiraGridView") # For navigation
@@ -344,19 +347,19 @@ class JiraGridView(QWidget):
         from PyQt6.QtCore import Qt
         from PyQt6.QtWidgets import QApplication
         
-        # Identificare se questa è la colonna dei favoriti
-        is_favorite_column = False
-        visible_columns = self.get_visible_columns()
-        
-        # Evita ordinamento sulla colonna dei favoriti
-        if 0 <= logical_index < len(visible_columns):
-            is_favorite_column = visible_columns[logical_index].get('id') == 'favorite'
-        
-        if is_favorite_column:
-            # Non permettiamo l'ordinamento sulla colonna dei preferiti
-            return
-            
         try:
+            # Identificare se questa è la colonna dei favoriti
+            is_favorite_column = False
+            visible_columns = self.get_visible_columns()
+            
+            # Evita ordinamento sulla colonna dei favoriti
+            if 0 <= logical_index < len(visible_columns):
+                is_favorite_column = visible_columns[logical_index].get('id') == 'favorite'
+            
+            if is_favorite_column:
+                # Non permettiamo l'ordinamento sulla colonna dei preferiti
+                return
+                
             # Check if Shift is pressed for cumulative sorting
             if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
                 # Cumulative sorting: add this column to sort order
@@ -387,10 +390,13 @@ class JiraGridView(QWidget):
             
             # Save sort order to settings
             self._save_sort_order()
+            
         except Exception as e:
             import traceback
             print(f"Error in _on_header_clicked: {e}")
             print(traceback.format_exc())
+            # Don't let the error propagate and crash the application
+            return
     
     def _apply_cumulative_sort(self):
         """Apply cumulative sorting to the table."""
@@ -398,33 +404,59 @@ class JiraGridView(QWidget):
             return
         
         try:
-            # Identify favorite column index
+            # Identify special column indices (columns that contain widgets)
             favorite_col_index = -1
+            priority_col_index = -1
             visible_columns = self.get_visible_columns()
+            
             for i, col in enumerate(visible_columns):
-                if col.get('id') == 'favorite':
+                col_id = col.get('id')
+                if col_id == 'favorite':
                     favorite_col_index = i
-                    break
+                elif col_id == 'priority':
+                    priority_col_index = i
                     
-            # Collect all row data including favorite state
+            # Collect all row data including widget states
             data_to_sort = []
             for row in range(self.table.rowCount()):
-                row_data = {'values': [], 'favorite_checked': False, 'favorite_widget': None}
+                row_data = {'values': [], 'widgets': {}}
                 
-                # Get text from all columns
+                # Get text from all columns, handling widgets specially
                 for col in range(self.table.columnCount()):
-                    if col != favorite_col_index:
-                        item = self.table.item(row, col)
-                        row_data['values'].append(item.text() if item else "")
-                    else:
-                        # For favorite column, get the widget state but store text as placeholder
+                    if col == favorite_col_index:
+                        # For favorite column, get the widget state
                         widget = self.table.cellWidget(row, col)
                         if widget:
-                            row_data['favorite_checked'] = widget.isChecked()
-                            row_data['favorite_widget'] = widget
+                            row_data['widgets'][col] = {
+                                'type': 'favorite',
+                                'checked': widget.isChecked(),
+                                'text': "★" if widget.isChecked() else "☆"
+                            }
                             row_data['values'].append("★" if widget.isChecked() else "☆")
                         else:
                             row_data['values'].append("☆")
+                    elif col == priority_col_index:
+                        # For priority column, get the combobox selection
+                        widget = self.table.cellWidget(row, col)
+                        if widget and hasattr(widget, 'currentText'):
+                            current_text = widget.currentText()
+                            current_data = widget.currentData() if hasattr(widget, 'currentData') else None
+                            row_data['widgets'][col] = {
+                                'type': 'priority',
+                                'text': current_text,
+                                'data': current_data,
+                                'current_index': widget.currentIndex() if hasattr(widget, 'currentIndex') else 0
+                            }
+                            row_data['values'].append(current_text)
+                        else:
+                            # Fallback: get text from item if no widget
+                            item = self.table.item(row, col)
+                            text = item.text() if item else ""
+                            row_data['values'].append(text)
+                    else:
+                        # Regular column - get text from item
+                        item = self.table.item(row, col)
+                        row_data['values'].append(item.text() if item else "")
                             
                 data_to_sort.append(row_data)
             
@@ -442,8 +474,11 @@ class JiraGridView(QWidget):
                         
                         # Handle time spent column specially
                         is_time_column = False
+                        is_priority_column = False
                         if 0 <= col_index < len(visible_columns):
-                            is_time_column = visible_columns[col_index].get('id') == 'time_spent'
+                            col_id = visible_columns[col_index].get('id')
+                            is_time_column = col_id == 'time_spent'
+                            is_priority_column = col_id == 'priority'
                         
                         if is_time_column and isinstance(value, str):
                             try:
@@ -458,9 +493,17 @@ class JiraGridView(QWidget):
                                 key.append((numeric_value, sort_info['order'] == Qt.SortOrder.DescendingOrder))
                             except Exception:
                                 key.append((0, sort_info['order'] == Qt.SortOrder.DescendingOrder))
+                        elif is_priority_column:
+                            # Priority sorting by predefined order
+                            priority_order = {
+                                'Highest': 5, 'High': 4, 'Medium': 3, 'Low': 2, 'Lowest': 1, '': 0
+                            }
+                            priority_value = priority_order.get(str(value), 0)
+                            key.append((priority_value, sort_info['order'] == Qt.SortOrder.DescendingOrder))
                         else:
-                            # String sorting
-                            key.append((str(value).lower(), sort_info['order'] == Qt.SortOrder.DescendingOrder))
+                            # String sorting - handle None values safely
+                            str_value = str(value) if value is not None else ""
+                            key.append((str_value.lower(), sort_info['order'] == Qt.SortOrder.DescendingOrder))
                 return key
             
             # Sort the data
@@ -480,33 +523,57 @@ class JiraGridView(QWidget):
                 
                 # Add all items back to table
                 for col, value in enumerate(row_data['values']):
-                    if col != favorite_col_index:
-                        self.table.setItem(row_position, col, QTableWidgetItem(value))
+                    if col in row_data['widgets']:
+                        # This column has a widget - recreate it
+                        widget_info = row_data['widgets'][col]
+                        if widget_info['type'] == 'favorite':
+                            from qfluentwidgets import TransparentToolButton
+                            favorite_widget = TransparentToolButton(widget_info['text'])
+                            favorite_widget.setCheckable(True)
+                            favorite_widget.setChecked(widget_info['checked'])
+                            favorite_widget.setToolTip("Aggiungi/rimuovi dai preferiti")
+                            self.table.setCellWidget(row_position, col, favorite_widget)
+                        elif widget_info['type'] == 'priority':
+                            from PyQt6.QtWidgets import QComboBox
+                            priority_combo = QComboBox()
+                            priority_combo.addItem("", "")
+                            priority_combo.addItem("Highest", "1")
+                            priority_combo.addItem("High", "2") 
+                            priority_combo.addItem("Medium", "3")
+                            priority_combo.addItem("Low", "4")
+                            priority_combo.addItem("Lowest", "5")
+                            
+                            # Restore the previous selection
+                            if widget_info.get('data'):
+                                index = priority_combo.findData(widget_info['data'])
+                                if index >= 0:
+                                    priority_combo.setCurrentIndex(index)
+                            else:
+                                index = priority_combo.findText(widget_info['text'])
+                                if index >= 0:
+                                    priority_combo.setCurrentIndex(index)
+                            
+                            self.table.setCellWidget(row_position, col, priority_combo)
+                    else:
+                        # Regular column - create text item
+                        item = QTableWidgetItem(str(value) if value is not None else "")
+                        self.table.setItem(row_position, col, item)
                         
-                # Handle favorite column separately
-                if favorite_col_index >= 0:
-                    from qfluentwidgets import TransparentToolButton
-                    favorite_widget = row_data.get('favorite_widget')
-                    
-                    # Create a new widget if we don't have the original
-                    if not favorite_widget:
-                        favorite_widget = TransparentToolButton("★" if row_data['favorite_checked'] else "☆")
-                        favorite_widget.setCheckable(True)
-                        favorite_widget.setChecked(row_data['favorite_checked'])
-                        favorite_widget.setToolTip("Aggiungi/rimuovi dai preferiti")
-                    
-                    self.table.setCellWidget(row_position, favorite_col_index, favorite_widget)
-            
             # Re-enable signals
             self.table.blockSignals(False)
             
             # Restore scroll position
             self.table.verticalScrollBar().setValue(vscroll)
             
+            # Emit signal to notify that sorting is completed and widgets need reconnecting
+            self.sorting_completed.emit()
+            
         except Exception as e:
             import traceback
             print(f"Error in _apply_cumulative_sort: {e}")
             print(traceback.format_exc())
+            # Don't let the error propagate and crash the application
+            return
     
     def _save_sort_order(self):
         """Save current sort order to settings."""

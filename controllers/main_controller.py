@@ -30,6 +30,7 @@ class MainController(QObject):
         self.app_settings = app_settings
         self.timezone_service = timezone_service
         self.open_detail_windows = {}  # Track open detail windows by issue key
+        self._opening_detail_window = False  # Flag to prevent automatic closures during opening
         # Track active threads started by this controller so we can shut them down
         self._active_threads: list[QThread] = []
         # Track active worker objects so they are not garbage-collected
@@ -182,12 +183,21 @@ class MainController(QObject):
                 pass
         self.view.jira_grid_view.table.verticalScrollBar().valueChanged.connect(self._on_scroll)
         self.view.jira_grid_view.table.doubleClicked.connect(self._open_detail_view)
+        
+        # Monitor item selection in the grid table
+        self.view.jira_grid_view.table.itemSelectionChanged.connect(self._on_grid_selection_changed)
+        # Installa event filter sulla tabella per monitorare gli eventi del mouse
+        self.view.jira_grid_view.table.installEventFilter(self)
+        
         self.view.jira_grid_view.apply_jql_btn.clicked.connect(self._apply_custom_jql)
         self.view.jira_grid_view.jql_combo.currentIndexChanged.connect(self._on_jql_combo_changed)
         self.view.jira_grid_view.favorites_btn.clicked.connect(self._on_favorites_toggled)
         
         # Connect notification button in JiraGridView
         self.view.jira_grid_view.notifications_btn.clicked.connect(self._show_notifications_dialog)
+        
+        # Connect sorting completed signal to reconnect favorite buttons
+        self.view.jira_grid_view.sorting_completed.connect(self._reconnect_favorite_buttons)
 
         # Install event filter on JQL combo box to handle Enter key
         self.view.jira_grid_view.jql_combo.installEventFilter(self)
@@ -218,6 +228,29 @@ class MainController(QObject):
                     pass
             except Exception:
                 pass
+                
+    def _on_grid_selection_changed(self):
+        """Monitors selection changes in the grid table."""
+        self._logger.info("[DEBUG] Selezione nella griglia cambiata")
+        selected = self.view.jira_grid_view.table.selectedItems()
+        if selected:
+            try:
+                # Get the selected row
+                row = selected[0].row()
+                key_item = self.view.jira_grid_view.table.item(row, 0)
+                if key_item:
+                    issue_key = key_item.text()
+                    self._logger.info(f"[DEBUG] Riga selezionata: {row}, Issue Key: {issue_key}")
+                    self._logger.info(f"[DEBUG] Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
+                    # Verifica se la finestra di dettaglio è attualmente aperta
+                    if issue_key in self.open_detail_windows:
+                        detail_window = self.open_detail_windows[issue_key]
+                        self._logger.info(f"[DEBUG] La finestra di dettaglio per {issue_key} è attualmente aperta. IsVisible: {detail_window.isVisible()}, IsHidden: {detail_window.isHidden()}")
+                    # Tracciamento stack per vedere da dove viene chiamato
+                    import traceback
+                    self._logger.info(f"[DEBUG] Stack trace:\n{traceback.format_stack()}")
+            except Exception as e:
+                self._logger.exception(f"[DEBUG] Errore durante l'elaborazione della selezione: {e}")
 
     def show_initial_view(self):
         """Shows the default view and triggers data loading."""
@@ -485,7 +518,11 @@ class MainController(QObject):
         table.setItem(row_position, 0, key_item)
         table.setItem(row_position, 1, title_item)
         table.setItem(row_position, 2, status_item)
-        table.setItem(row_position, 3, priority_item)
+        
+        # Priority column - create combobox for local editing
+        priority_combo = self._create_priority_combo(jira_key, priority_name)
+        table.setCellWidget(row_position, 3, priority_combo)
+        
         table.setItem(row_position, 4, time_item)
         
         # Favorite button logic
@@ -498,6 +535,75 @@ class MainController(QObject):
         fav_button.setText("★" if is_fav else "☆")
         fav_button.clicked.connect(lambda _, key=jira_key, btn=fav_button: self._toggle_favorite(key, btn))
         table.setCellWidget(row_position, 5, fav_button)
+        
+    def _create_priority_combo(self, jira_key: str, current_priority: str = ""):
+        """Create a priority combobox for the given Jira key."""
+        from PyQt6.QtWidgets import QComboBox
+        
+        priority_combo = QComboBox()
+        priority_combo.addItem("", "")
+        priority_combo.addItem("Highest", "1")
+        priority_combo.addItem("High", "2")
+        priority_combo.addItem("Medium", "3")
+        priority_combo.addItem("Low", "4")
+        priority_combo.addItem("Lowest", "5")
+        
+        # Get local priority override if exists
+        local_priority = self.db_service.get_local_priority(jira_key)
+        if local_priority:
+            # Use local priority
+            priority_name = local_priority.get('name', '')
+            index = priority_combo.findText(priority_name)
+            if index >= 0:
+                priority_combo.setCurrentIndex(index)
+        elif current_priority:
+            # Use current priority from Jira
+            index = priority_combo.findText(current_priority)
+            if index >= 0:
+                priority_combo.setCurrentIndex(index)
+        
+        # Connect change signal
+        priority_combo.currentTextChanged.connect(
+            lambda text, key=jira_key: self._on_priority_changed(key, text)
+        )
+        
+        return priority_combo
+        
+    def _on_priority_changed(self, jira_key: str, priority_name: str):
+        """Handle priority change in the grid combobox."""
+        try:
+            # Get priority ID for the name
+            priority_id = self._get_priority_id_for_name(priority_name)
+            
+            # Save the local priority override
+            if priority_name and priority_id:
+                self.db_service.set_local_priority(jira_key, priority_id, priority_name)
+            else:
+                self.db_service.remove_local_priority(jira_key)
+                
+            # Add to sync queue if auto_sync is enabled and we're online
+            auto_sync = self.app_settings.get_setting("auto_sync", "false").lower() == "true"
+            if auto_sync and self.is_jira_available and priority_id:
+                import json
+                payload = json.dumps({
+                    "jira_key": jira_key,
+                    "priority_id": priority_id
+                })
+                self.db_service.add_to_sync_queue("UPDATE_PRIORITY", payload)
+                    
+        except Exception as e:
+            self._logger.error(f"Error updating priority for {jira_key}: {e}")
+            
+    def _get_priority_id_for_name(self, priority_name: str) -> str:
+        """Get the priority ID for a given priority name."""
+        priority_map = {
+            "Highest": "1",
+            "High": "2", 
+            "Medium": "3",
+            "Low": "4",
+            "Lowest": "5"
+        }
+        return priority_map.get(priority_name, "")
 
     def _toggle_favorite(self, jira_key: str, button: QPushButton):
         """Toggles the favorite status of an issue."""
@@ -513,6 +619,64 @@ class MainController(QObject):
         # If the favorite filter is active, we need to refresh the view
         if self.view.jira_grid_view.favorites_btn.isChecked():
             self._on_favorites_toggled(True)
+            
+    def _reconnect_favorite_buttons(self):
+        """Reconnect all favorite buttons and priority comboboxes after sorting is completed."""
+        try:
+            table = self.view.jira_grid_view.table
+            
+            # Find the favorite and priority column indices
+            favorite_col_index = -1
+            priority_col_index = -1
+            visible_columns = self.view.jira_grid_view.get_visible_columns()
+            for i, col in enumerate(visible_columns):
+                col_id = col.get('id')
+                if col_id == 'favorite':
+                    favorite_col_index = i
+                elif col_id == 'priority':
+                    priority_col_index = i
+            
+            # Reconnect all widgets
+            for row in range(table.rowCount()):
+                # Get the Jira key from the first column
+                key_item = table.item(row, 0)
+                if not key_item:
+                    continue
+                    
+                jira_key = key_item.text()
+                
+                # Reconnect favorite button
+                if favorite_col_index >= 0:
+                    fav_button = table.cellWidget(row, favorite_col_index)
+                    if fav_button:
+                        # Disconnect any existing connections
+                        try:
+                            fav_button.clicked.disconnect()
+                        except TypeError:
+                            pass  # No connections to disconnect
+                        
+                        # Reconnect with the correct jira_key
+                        fav_button.clicked.connect(lambda _, key=jira_key, btn=fav_button: self._toggle_favorite(key, btn))
+                
+                # Reconnect priority combobox
+                if priority_col_index >= 0:
+                    priority_combo = table.cellWidget(row, priority_col_index)
+                    if priority_combo and hasattr(priority_combo, 'currentTextChanged'):
+                        # Disconnect any existing connections
+                        try:
+                            priority_combo.currentTextChanged.disconnect()
+                        except TypeError:
+                            pass  # No connections to disconnect
+                        
+                        # Reconnect with the correct jira_key
+                        priority_combo.currentTextChanged.connect(
+                            lambda text, key=jira_key: self._on_priority_changed(key, text)
+                        )
+                    
+        except Exception as e:
+            self._logger.error(f"Error reconnecting widgets: {e}")
+            import traceback
+            self._logger.error(traceback.format_exc())
 
 
     def _on_scroll(self, value):
@@ -555,7 +719,8 @@ class MainController(QObject):
             
         # Track the dialog window
         self._open_dialog_windows.append(config_dialog)
-        config_dialog.destroyed.connect(lambda: self._on_dialog_window_closed(config_dialog))
+        from functools import partial
+        config_dialog.destroyed.connect(partial(self._on_dialog_window_closed, config_dialog))
         
         # Set DB service
         config_controller.set_db_service(self.db_service)
@@ -740,7 +905,8 @@ class MainController(QObject):
             
             # Track the dialog window
             self._open_dialog_windows.append(jql_history_controller.view)
-            jql_history_controller.view.destroyed.connect(lambda: self._on_dialog_window_closed(jql_history_controller.view))
+            from functools import partial
+            jql_history_controller.view.destroyed.connect(partial(self._on_dialog_window_closed, jql_history_controller.view))
             
             # Show the view now
             jql_history_controller.view.show()
@@ -776,7 +942,8 @@ class MainController(QObject):
             
             # Track the dialog window
             self._open_dialog_windows.append(notes_dialog)
-            notes_dialog.destroyed.connect(lambda: self._on_dialog_window_closed(notes_dialog))
+            from functools import partial
+            notes_dialog.destroyed.connect(partial(self._on_dialog_window_closed, notes_dialog))
             
             # Show the dialog now
             notes_dialog.show()
@@ -807,7 +974,8 @@ class MainController(QObject):
             
             # Track the dialog window
             self._open_dialog_windows.append(grid_dialog)
-            grid_dialog.destroyed.connect(lambda: self._on_dialog_window_closed(grid_dialog))
+            from functools import partial
+            grid_dialog.destroyed.connect(partial(self._on_dialog_window_closed, grid_dialog))
             
             # Show the dialog now
             grid_dialog.show()
@@ -825,49 +993,69 @@ class MainController(QObject):
             return
             
         jira_key = jira_key.strip()
+        self._logger.info(f"Opening detail for: {jira_key}. Currently open: {list(self.open_detail_windows.keys())}")
         
-        # Check if a window for this issue is already open
-        if jira_key in self.open_detail_windows:
-            self.open_detail_windows[jira_key].activateWindow()
-            return
-            
-        # Create a new detail view
-        from views.jira_detail_view import JiraDetailView
-        from controllers.jira_detail_controller import JiraDetailController
-
-        detail_window = JiraDetailView(jira_key, parent=None)  # No parent for top-level
+        # Set flag to prevent automatic closures during opening
+        self._opening_detail_window = True
         
-        # Ensure this widget is a top-level window (not an embedded child)
         try:
-            detail_window.setWindowFlag(Qt.WindowType.Window, True)
-        except Exception:
-            pass
+            # Check if a window for this issue is already open
+            if jira_key in self.open_detail_windows:
+                self._logger.info(f"Window for {jira_key} already open, activating...")
+                self.open_detail_windows[jira_key].activateWindow()
+                return
+                
+            # Limit the number of open detail windows to prevent too many open at once
+            MAX_DETAIL_WINDOWS = 3  # Allow up to 3 detail windows open simultaneously
+            if len(self.open_detail_windows) >= MAX_DETAIL_WINDOWS:
+                # Close the oldest detail window
+                oldest_key = next(iter(self.open_detail_windows))
+                self._logger.info(f"Reached limit ({MAX_DETAIL_WINDOWS}), closing oldest: {oldest_key}")
+                self._close_detail_window(oldest_key)
+                
+            # Create a new detail view
+            from views.jira_detail_view import JiraDetailView
+            from controllers.jira_detail_controller import JiraDetailController
+
+            detail_window = JiraDetailView(jira_key, parent=None)  # No parent for top-level
             
-        detail_controller = JiraDetailController(
-            detail_window, 
-            self.jira_service, 
-            self.db_service,
-            jira_key
-        )
+            # Ensure this widget is a top-level window (not an embedded child)
+            try:
+                detail_window.setWindowFlag(Qt.WindowType.Window, True)
+            except Exception:
+                pass
+                
+            detail_controller = JiraDetailController(
+                detail_window, 
+                self.jira_service, 
+                self.db_service,
+                jira_key
+            )
+            
+            # Store controller on the window to keep it alive
+            detail_window.controller = detail_controller 
+            
+            detail_controller._load_data()
+            self.open_detail_windows[jira_key] = detail_window
+            self._logger.info(f"Added {jira_key} to tracking. Open windows: {list(self.open_detail_windows.keys())}")
+            # Usiamo solo il segnale window_closed e non destroyed per evitare doppie chiamate
+            # detail_window.destroyed.connect(lambda: self._on_detail_window_closed(jira_key))
+            detail_controller.window_closed.connect(self._on_detail_window_closed)
+            detail_controller.timer_started.connect(self._on_timer_started)
+            detail_controller.timer_stopped.connect(self._on_timer_stopped)
+            detail_controller.time_updated.connect(self._on_time_updated)
+            
+            # Adjust window flags for proper stacking
+            self._adjust_window_flags_for_detail(detail_window)
+            
+            # Show the window
+            detail_window.show()
+            detail_window.raise_()
+            detail_window.activateWindow()
         
-        # Store controller on the window to keep it alive
-        detail_window.controller = detail_controller 
-        
-        detail_controller._load_data()
-        self.open_detail_windows[jira_key] = detail_window
-        detail_window.destroyed.connect(lambda: self._on_detail_window_closed(jira_key))
-        detail_controller.window_closed.connect(self._on_detail_window_closed)
-        detail_controller.timer_started.connect(self._on_timer_started)
-        detail_controller.timer_stopped.connect(self._on_timer_stopped)
-        detail_controller.time_updated.connect(self._on_time_updated)
-        
-        # Adjust window flags for proper stacking
-        self._adjust_window_flags_for_detail(detail_window)
-        
-        # Show the window
-        detail_window.show()
-        detail_window.raise_()
-        detail_window.activateWindow()
+        finally:
+            # Always reset the flag
+            self._opening_detail_window = False
         
     def _on_jql_selected_from_history(self, query):
         """Applies a JQL query selected from the history dialog."""
@@ -1134,52 +1322,79 @@ class MainController(QObject):
             return
 
         issue_key = key_item.text()
+        self._logger.info(f"Double-click opening detail for: {issue_key}. Currently open: {list(self.open_detail_windows.keys())}")
 
-        if issue_key in self.open_detail_windows:
-            self.open_detail_windows[issue_key].activateWindow()
-            return
-
-        from views.jira_detail_view import JiraDetailView
-        from controllers.jira_detail_controller import JiraDetailController
-
-        detail_window = JiraDetailView(issue_key, parent=self.view)
-        # Ensure this widget is a top-level window (not an embedded child)
-        try:
-            detail_window.setWindowFlag(Qt.WindowType.Window, True)
-        except Exception:
-            pass
-        detail_controller = JiraDetailController(
-            detail_window, 
-            self.jira_service, 
-            self.db_service,
-            issue_key
-        )
-
-        # Store controller on the window to keep it alive
-        detail_window.controller = detail_controller 
-
-        detail_controller._load_data()
-        self.open_detail_windows[issue_key] = detail_window
-        detail_window.destroyed.connect(lambda: self._on_detail_window_closed(issue_key))
-        detail_controller.window_closed.connect(self._on_detail_window_closed)
-        detail_controller.timer_started.connect(self._on_timer_started)
-        detail_controller.timer_stopped.connect(self._on_timer_stopped)
-        detail_controller.time_updated.connect(self._on_time_updated)
-
-        # Initialize priority combo box with available priorities
-        from controllers.priority_config_controller import PriorityConfigController
-        if not hasattr(self, 'priority_controller'):
-            self.priority_controller = PriorityConfigController(
-                self.db_service,
-                self.jira_service
-            )
+        # Set flag to prevent automatic closures during opening
+        self._opening_detail_window = True
         
-        # Populate priorities in the detail view
-        priorities = self.priority_controller.get_available_priorities()
-        detail_controller.populate_priority_combo(priorities)
+        try:
+            # Check if a window for this issue is already open
+            if issue_key in self.open_detail_windows:
+                self._logger.info(f"Window for {issue_key} already open via double-click, activating...")
+                self.open_detail_windows[issue_key].activateWindow()
+                return
+                
+            # Limit the number of open detail windows to prevent too many open at once
+            MAX_DETAIL_WINDOWS = 3  # Allow up to 3 detail windows open simultaneously
+            if len(self.open_detail_windows) >= MAX_DETAIL_WINDOWS:
+                # Close the oldest detail window
+                oldest_key = next(iter(self.open_detail_windows))
+                self._logger.info(f"Reached limit ({MAX_DETAIL_WINDOWS}), closing oldest: {oldest_key}")
+                self._close_detail_window(oldest_key)
 
-        # Adjust window flags for proper stacking
-        self._adjust_window_flags_for_detail(detail_window)
+            # Create a new detail view
+            from views.jira_detail_view import JiraDetailView
+            from controllers.jira_detail_controller import JiraDetailController
+
+            detail_window = JiraDetailView(issue_key, parent=self.view)
+            # Ensure this widget is a top-level window (not an embedded child)
+            try:
+                detail_window.setWindowFlag(Qt.WindowType.Window, True)
+            except Exception:
+                pass
+            detail_controller = JiraDetailController(
+                detail_window, 
+                self.jira_service, 
+                self.db_service,
+                issue_key
+            )
+
+            # Store controller on the window to keep it alive
+            detail_window.controller = detail_controller 
+
+            detail_controller._load_data()
+            self.open_detail_windows[issue_key] = detail_window
+            self._logger.info(f"Added {issue_key} to tracking. Open windows: {list(self.open_detail_windows.keys())}")
+            # Usiamo solo il segnale window_closed e non destroyed per evitare doppie chiamate
+            # detail_window.destroyed.connect(lambda: self._on_detail_window_closed(issue_key))
+            detail_controller.window_closed.connect(self._on_detail_window_closed)
+            detail_controller.timer_started.connect(self._on_timer_started)
+            detail_controller.timer_stopped.connect(self._on_timer_stopped)
+            detail_controller.time_updated.connect(self._on_time_updated)
+
+            # Initialize priority combo box with available priorities
+            from controllers.priority_config_controller import PriorityConfigController
+            if not hasattr(self, 'priority_controller'):
+                self.priority_controller = PriorityConfigController(
+                    self.db_service,
+                    self.jira_service
+                )
+            
+            # Populate priorities in the detail view
+            priorities = self.priority_controller.get_available_priorities()
+            detail_controller.populate_priority_combo(priorities)
+
+            # Adjust window flags for proper stacking
+            self._adjust_window_flags_for_detail(detail_window)
+            
+            # Show the window
+            detail_window.show()
+            detail_window.raise_()
+            detail_window.activateWindow()
+        
+        finally:
+            # Always reset the flag
+            self._opening_detail_window = False
 
     def _show_last_active_jira(self):
         """Opens the detail view for the last active Jira issue."""
@@ -1207,9 +1422,17 @@ class MainController(QObject):
         # We can simulate a model index or call a new shared method.
         # For simplicity, let's just open it directly.
         
+        # Check if a window for this issue is already open
         if last_active_key in self.open_detail_windows:
             self.open_detail_windows[last_active_key].activateWindow()
             return
+            
+        # Limit the number of open detail windows to prevent too many open at once
+        MAX_DETAIL_WINDOWS = 3  # Allow up to 3 detail windows open simultaneously
+        if len(self.open_detail_windows) >= MAX_DETAIL_WINDOWS:
+            # Close the oldest detail window
+            oldest_key = next(iter(self.open_detail_windows))
+            self._close_detail_window(oldest_key)
 
         from views.jira_detail_view import JiraDetailView
         from controllers.jira_detail_controller import JiraDetailController
@@ -1230,7 +1453,8 @@ class MainController(QObject):
         
         detail_controller._load_data()
         self.open_detail_windows[last_active_key] = detail_window
-        detail_window.destroyed.connect(lambda: self._on_detail_window_closed(last_active_key))
+        # Usiamo solo il segnale window_closed e non destroyed per evitare doppie chiamate
+        # detail_window.destroyed.connect(lambda: self._on_detail_window_closed(last_active_key))
         detail_controller.window_closed.connect(self._on_detail_window_closed)
         detail_controller.timer_started.connect(self._on_timer_started)
         detail_controller.timer_stopped.connect(self._on_timer_stopped)
@@ -1342,16 +1566,34 @@ class MainController(QObject):
             self._active_timer_seconds = total_seconds
             self._update_widget_display()
 
+    def _ensure_detail_windows_visible(self):
+        """Assicura che tutte le finestre di dettaglio siano visibili."""
+        self._logger.info(f"[DEBUG] Assicuro che tutte le {len(self.open_detail_windows)} finestre di dettaglio siano visibili")
+        for key, window in self.open_detail_windows.items():
+            if window.isHidden():
+                self._logger.info(f"[DEBUG] Finestra {key} era nascosta, la rendo visibile")
+                window.show()
+                window.raise_()
+    
     def _get_open_dialog_windows(self):
         """Get list of currently open dialog windows."""
         windows = []
         try:
             # Add any open detail windows
-            windows.extend(self.open_detail_windows.values())
+            detail_windows = list(self.open_detail_windows.values())
+            windows.extend(detail_windows)
             # Add tracked dialog windows
             windows.extend(self._open_dialog_windows)
-        except Exception:
-            pass
+            self._logger.info(f"[DEBUG] _get_open_dialog_windows: Finestre dettaglio={len(detail_windows)}, Altri dialoghi={len(self._open_dialog_windows)}")
+            # Verifica stato finestre di dettaglio
+            for key, window in self.open_detail_windows.items():
+                self._logger.info(f"[DEBUG] _get_open_dialog_windows - Stato finestra {key}: IsVisible={window.isVisible()}, IsActive={window.isActiveWindow()}")
+                
+            # Assicuriamoci che le finestre di dettaglio siano sempre visibili
+            self._ensure_detail_windows_visible()
+            
+        except Exception as e:
+            self._logger.exception(f"[DEBUG] Errore in _get_open_dialog_windows: {e}")
         return windows
 
     def _on_dialog_window_closed(self, dialog_window):
@@ -1364,8 +1606,77 @@ class MainController(QObject):
 
     def _on_detail_window_closed(self, jira_key: str):
         """Removes the detail window from the tracking dictionary when it's closed."""
+        self._logger.info(f"[DEBUG] _on_detail_window_closed chiamato per: {jira_key}")
+        self._logger.info(f"[DEBUG] Finestre aperte prima della chiusura: {list(self.open_detail_windows.keys())}")
+        self._logger.info(f"[DEBUG] Backtrace:", stack_info=True)
+        
+        # Proteggiamo contro le chiamate doppie
+        # Se riceviamo un segnale destroyed dopo che la finestra è già stata rimossa dal dizionario
         if jira_key in self.open_detail_windows:
             del self.open_detail_windows[jira_key]
+            self._logger.info(f"[DEBUG] Finestra di dettaglio {jira_key} rimossa dal tracking. Finestre rimaste: {list(self.open_detail_windows.keys())}")
+        else:
+            self._logger.info(f"[DEBUG] La finestra per {jira_key} era già stata rimossa o non era nel dizionario.")
+    
+    def _manage_detail_windows_limit(self):
+        """Manages the limit of open detail windows, closing the oldest if necessary."""
+        MAX_DETAIL_WINDOWS = 3  # Allow up to 3 detail windows open simultaneously
+        if len(self.open_detail_windows) >= MAX_DETAIL_WINDOWS:
+            # Close the oldest detail window
+            oldest_key = next(iter(self.open_detail_windows))
+            self._close_detail_window(oldest_key)
+            
+    def _close_detail_window(self, jira_key):
+        """Closes a specific detail window."""
+        try:
+            if jira_key in self.open_detail_windows:
+                self._logger.info(f"[DEBUG] _close_detail_window chiamato per: {jira_key}")
+                window = self.open_detail_windows[jira_key]
+                self._logger.info(f"[DEBUG] Stato finestra prima della chiusura: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}")
+                
+                # Chi sta chiamando la chiusura?
+                import traceback
+                self._logger.info(f"[DEBUG] Backtrace della chiusura:\n{traceback.format_stack()}")
+                
+                # Controllare che non ci siano chiusure durante la selezione della griglia
+                selected = self.view.jira_grid_view.table.selectedItems()
+                if selected:
+                    row = selected[0].row()
+                    key_item = self.view.jira_grid_view.table.item(row, 0)
+                    if key_item:
+                        selected_key = key_item.text()
+                        self._logger.info(f"[DEBUG] Chiusura finestra mentre è selezionato: {selected_key}")
+                        if selected_key == jira_key:
+                            self._logger.warning(f"[DEBUG] ATTENZIONE: Stiamo chiudendo la stessa finestra che è selezionata nella griglia!")
+                
+                self._logger.info(f"[DEBUG] Chiamando window.close() per {jira_key}")
+                window.close()  # This will trigger the removal from the dictionary
+                self._logger.info(f"[DEBUG] window.close() eseguita per {jira_key}")
+        except Exception as e:
+            self._logger.error(f"Error closing detail window for {jira_key}: {e}")
+            self._logger.exception(f"[DEBUG] Dettaglio errore per {jira_key}")
+            
+    def _close_all_detail_windows(self):
+        """Closes all currently open detail windows."""
+        # Don't close windows if we're in the middle of opening a new one
+        if self._opening_detail_window:
+            self._logger.info("Skipping close_all_detail_windows - currently opening a new window")
+            return
+            
+        try:
+            self._logger.info(f"Closing all detail windows: {list(self.open_detail_windows.keys())}")
+            # Create a copy of the keys since we'll be modifying the dictionary
+            keys_to_close = list(self.open_detail_windows.keys())
+            
+            for key in keys_to_close:
+                try:
+                    window = self.open_detail_windows[key]
+                    # Call close() on the window to ensure controller cleanup is performed
+                    window.close()
+                except Exception as e:
+                    self._logger.error(f"Error closing detail window for {key}: {e}")
+        except Exception as e:
+            self._logger.error(f"Error in _close_all_detail_windows: {e}")
 
     # --- Mini Widget Methods ---
 
@@ -1524,6 +1835,13 @@ class MainController(QObject):
             if not controller.is_running:
                 controller.start_timer()
         else:
+            # Limit the number of open detail windows to prevent too many open at once
+            MAX_DETAIL_WINDOWS = 3  # Allow up to 3 detail windows open simultaneously
+            if len(self.open_detail_windows) >= MAX_DETAIL_WINDOWS:
+                # Close the oldest detail window
+                oldest_key = next(iter(self.open_detail_windows))
+                self._close_detail_window(oldest_key)
+            
             # If not open, create it and show it so the user can see the timer
             from views.jira_detail_view import JiraDetailView
             from controllers.jira_detail_controller import JiraDetailController
@@ -1539,7 +1857,8 @@ class MainController(QObject):
             )
             detail_window.controller = detail_controller
             self.open_detail_windows[jira_key] = detail_window
-            detail_window.destroyed.connect(lambda: self._on_detail_window_closed(jira_key))
+            # Usiamo solo il segnale window_closed e non destroyed per evitare doppie chiamate
+            # detail_window.destroyed.connect(lambda: self._on_detail_window_closed(jira_key))
             detail_controller.window_closed.connect(self._on_detail_window_closed)
             detail_controller.timer_started.connect(self._on_timer_started)
             detail_controller.timer_stopped.connect(self._on_timer_stopped)
@@ -1570,6 +1889,13 @@ class MainController(QObject):
             self.open_detail_windows[jira_key].show()
             self.open_detail_windows[jira_key].activateWindow()
             return
+            
+        # Limit the number of open detail windows to prevent too many open at once
+        MAX_DETAIL_WINDOWS = 3  # Allow up to 3 detail windows open simultaneously
+        if len(self.open_detail_windows) >= MAX_DETAIL_WINDOWS:
+            # Close the oldest detail window
+            oldest_key = next(iter(self.open_detail_windows))
+            self._close_detail_window(oldest_key)
             
         # Utilizziamo il nuovo MiniTimerController con la stessa interfaccia del mini widget
         try:
@@ -1623,7 +1949,12 @@ class MainController(QObject):
             # Aggiungiamo alle finestre aperte
             self.open_detail_windows[jira_key] = mini_timer_controller.view
             self.open_detail_windows[jira_key].controller = mini_timer_controller
-            mini_timer_controller.view.destroyed.connect(lambda: self._on_detail_window_closed(jira_key))
+            
+            # Utilizziamo una funzione parziale per il collegamento del segnale destroyed
+            # per evitare problemi di riferimento alla variabile jira_key
+            from functools import partial
+            destroy_handler = partial(self._on_detail_window_closed, jira_key)
+            mini_timer_controller.view.destroyed.connect(destroy_handler)
             
             self._logger.debug(f"Mini timer started for {jira_key} from notes (fittizio: {is_fictional})")
             
@@ -1671,13 +2002,50 @@ class MainController(QObject):
         that were temporarily given WindowStaysOnTopHint. This helps when the user
         explicitly activates the main window (clicking its taskbar entry, etc.)."""
         try:
+            from PyQt6.QtWidgets import QTableWidget
+            from PyQt6.QtCore import QEvent
+            from PyQt6.QtGui import QMouseEvent
+
+            # Log any rilevanti eventi che potrebbero causare la chiusura delle finestre
+            if event.type() == QEvent.Type.WindowActivate:
+                self._logger.info(f"[DEBUG] WindowActivate event ricevuto da {watched}")
+                # Assicuriamoci che le finestre di dettaglio siano visibili in caso di attivazione di qualsiasi finestra
+                self._ensure_detail_windows_visible()
+            elif event.type() == QEvent.Type.FocusIn:
+                self._logger.info(f"[DEBUG] FocusIn event ricevuto da {watched}")
+            elif event.type() == QEvent.Type.MouseButtonPress:
+                self._logger.info(f"[DEBUG] MouseButtonPress event ricevuto da {watched}")
+                # Log specifico per i click sulla tabella
+                if isinstance(watched, QTableWidget) or (hasattr(watched, 'table') and watched is self.view.jira_grid_view.table):
+                    mouse_event = QMouseEvent(event)
+                    pos = mouse_event.pos()
+                    self._logger.info(f"[DEBUG] Click sulla tabella rilevato a posizione ({pos.x()}, {pos.y()})")
+                    self._logger.info(f"[DEBUG] Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
+                    
+                    # Tracciamento dello stato delle finestre di dettaglio
+                    for key, window in self.open_detail_windows.items():
+                        self._logger.info(f"[DEBUG] Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}, IsModal={window.isModal()}, IsActive={window.isActiveWindow()}")
+
+                    # Assicuriamoci che le finestre di dettaglio rimangano visibili anche dopo il click sulla tabella
+                    self._ensure_detail_windows_visible()
+                    
+                    # Tracciamento stack
+                    import traceback
+                    self._logger.info(f"[DEBUG] Stack trace al click:\n{traceback.format_stack()}")
+            elif event.type() == QEvent.Type.MouseButtonRelease:
+                if isinstance(watched, QTableWidget) or (hasattr(watched, 'table') and watched is self.view.jira_grid_view.table):
+                    self._logger.info(f"[DEBUG] MouseButtonRelease sulla tabella")
+            elif event.type() == QEvent.Type.MouseButtonDblClick:
+                if isinstance(watched, QTableWidget) or (hasattr(watched, 'table') and watched is self.view.jira_grid_view.table):
+                    self._logger.info(f"[DEBUG] MouseButtonDblClick sulla tabella")
+            
             if watched is self.view and event.type() == QEvent.Type.WindowActivate:
                 try:
                     self._on_main_activated()
                 except Exception:
                     pass
-        except Exception:
-            pass
+        except Exception as e:
+            self._logger.exception(f"[DEBUG] Errore durante l'eventFilter: {e}")
         # Continue normal event processing
         return super().eventFilter(watched, event)
 
@@ -1693,17 +2061,27 @@ class MainController(QObject):
         - Outputs: main window raised/activated; dialogs remain open and visible
         - Error modes: best-effort (exceptions are caught and logged)
         """
+        self._logger.info(f"[DEBUG] _on_main_activated chiamato. Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
         try:
             # First ensure all dialog windows remain visible and non-modal
             # This is critical to prevent them from being closed when main is activated
             try:
                 from PyQt6.QtCore import Qt
-                for win in self._get_open_dialog_windows():
+                open_windows = self._get_open_dialog_windows()
+                self._logger.info(f"[DEBUG] Numero di finestre di dialogo aperte: {len(open_windows)}")
+                # Tracciamento dettagli finestre di dettaglio
+                for key, window in self.open_detail_windows.items():
+                    self._logger.info(f"[DEBUG] _on_main_activated - Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}, IsModal={window.isModal()}, IsActive={window.isActiveWindow()}")
+                
+                for win in open_windows:
                     try:
                         # Make dialog non-modal if it isn't already
                         try:
+                            prev_modal = win.isModal()
                             win.setModal(False)
-                        except Exception:
+                            self._logger.info(f"[DEBUG] Cambiato modal da {prev_modal} a False per {win}")
+                        except Exception as e:
+                            self._logger.info(f"[DEBUG] Errore nel cambiare modal state: {e}")
                             pass
                             
                         # Remove WindowStaysOnTopHint but don't recreate the window
@@ -1720,16 +2098,23 @@ class MainController(QObject):
                                     flags = flags & ~Qt.WindowType.WindowStaysOnTopHint
                                     # Remember the visibility state
                                     was_visible = win.isVisible()
+                                    self._logger.info(f"[DEBUG] Modificando window flag: Finestra {win} visibile: {was_visible}")
                                     win.setWindowFlags(flags)
                                     # Restore visibility if it was changed
                                     if was_visible and not win.isVisible():
+                                        self._logger.info(f"[DEBUG] La finestra {win} è stata nascosta dopo setWindowFlags, la rendo visibile")
                                         win.show()
-                            except Exception:
+                                    
+                                    # Doppio controllo sulla visibilità dopo le modifiche
+                                    self._logger.info(f"[DEBUG] Stato finestra dopo setWindowFlags: IsVisible={win.isVisible()}")
+                            except Exception as e:
+                                self._logger.info(f"[DEBUG] Errore nella modifica delle flag di finestra: {e}")
                                 pass
-                    except Exception:
+                    except Exception as e:
+                        self._logger.info(f"[DEBUG] Errore nella gestione della finestra di dialogo: {e}")
                         pass
-            except Exception:
-                logger.exception('Error preparing dialog windows')
+            except Exception as e:
+                self._logger.exception(f'[DEBUG] Error preparing dialog windows: {e}')
                 pass
 
             # Now raise the main window
@@ -1739,17 +2124,42 @@ class MainController(QObject):
             except Exception:
                 pass
 
+            # Salviamo lo stato di visibilità di tutte le finestre di dettaglio
+            self._logger.info(f"[DEBUG] Prima di processEvents - Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
+            for key, window in self.open_detail_windows.items():
+                # Forza la visibilità prima del processEvents per evitare che diventino invisibili
+                if window.isHidden():
+                    self._logger.info(f"[DEBUG] Forzando la visibilità della finestra {key} prima di processEvents")
+                    window.show()
+                self._logger.info(f"[DEBUG] Prima di processEvents - Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}")
+
             # Allow the window system to process these changes immediately
             try:
+                from PyQt6.QtWidgets import QApplication
+                self._logger.info(f"[DEBUG] Chiamando QApplication.processEvents()")
                 QApplication.processEvents()
-            except Exception:
+            except Exception as e:
+                self._logger.info(f"[DEBUG] Errore in processEvents: {e}")
                 pass
+                
+            # Verifica stato finestre di dettaglio dopo processEvents e ripristina la visibilità
+            self._logger.info(f"[DEBUG] Dopo processEvents - Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
+            for key, window in self.open_detail_windows.items():
+                self._logger.info(f"[DEBUG] Dopo processEvents - Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}")
+                
+                # Ripristina SEMPRE la visibilità di tutte le finestre di dettaglio dopo processEvents
+                if window.isHidden():
+                    self._logger.info(f"[DEBUG] Ripristino visibilità per la finestra {key}")
+                    window.show()
+                    window.raise_()
+                    # Non attiviamo per non rubare il focus dalla finestra principale
+                    # window.activateWindow()
                 
             # Log successful operation at debug level
             try:
-                logger.debug("Main window activated and raised; %d dialog(s) remain open", 
-                            len(self._get_open_dialog_windows()))
-            except Exception:
+                self._logger.info(f"[DEBUG] Main window activated and raised; {len(self._get_open_dialog_windows())} dialog(s) remain open")
+            except Exception as e:
+                self._logger.info(f"[DEBUG] Errore nel logging finale: {e}")
                 pass
         except Exception:
             logger.exception('Error while bringing main to front')
@@ -1805,7 +2215,8 @@ class MainController(QObject):
             
             # Track the dialog window
             self._open_dialog_windows.append(sync_queue_controller.view)
-            sync_queue_controller.view.destroyed.connect(lambda: self._on_dialog_window_closed(sync_queue_controller.view))
+            from functools import partial
+            sync_queue_controller.view.destroyed.connect(partial(self._on_dialog_window_closed, sync_queue_controller.view))
             
             # Show the view now
             sync_queue_controller.view.show()
@@ -1840,7 +2251,8 @@ class MainController(QObject):
             
             # Track the dialog window
             self._open_dialog_windows.append(notifications_dialog)
-            notifications_dialog.destroyed.connect(lambda: self._on_dialog_window_closed(notifications_dialog))
+            from functools import partial
+            notifications_dialog.destroyed.connect(partial(self._on_dialog_window_closed, notifications_dialog))
             
             # Load notification colors from settings
             if hasattr(self, 'app_settings'):
@@ -1864,33 +2276,8 @@ class MainController(QObject):
 
     def _open_issue_from_history(self, jira_key: str):
         """Opens a detail view for an issue selected from history."""
-        # This method is very similar to _open_detail_view but takes just the key
-        if jira_key in self.open_detail_windows:
-            self.open_detail_windows[jira_key].activateWindow()
-            return
-            
-        from views.jira_detail_view import JiraDetailView
-        from controllers.jira_detail_controller import JiraDetailController
-
-        detail_window = JiraDetailView(jira_key)
-        detail_controller = JiraDetailController(
-            detail_window, 
-            self.jira_service, 
-            self.db_service,
-            jira_key
-        )
-        
-        # Store controller on the window to keep it alive
-        detail_window.controller = detail_controller 
-        
-        detail_controller._load_data()
-        self.open_detail_windows[jira_key] = detail_window
-        detail_window.destroyed.connect(lambda: self._on_detail_window_closed(jira_key))
-        detail_controller.window_closed.connect(self._on_detail_window_closed)
-        detail_controller.timer_started.connect(self._on_timer_started)
-        detail_controller.timer_stopped.connect(self._on_timer_stopped)
-        detail_controller.time_updated.connect(self._on_time_updated)
-        detail_window.show()
+        # Simply delegate to our main method that handles this correctly
+        self._open_detail_from_key(jira_key)
         
     # --- Network status handling methods ---
     

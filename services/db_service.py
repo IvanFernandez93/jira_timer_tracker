@@ -69,9 +69,17 @@ class DatabaseService:
                     PriorityId TEXT NOT NULL,
                     PriorityName TEXT,
                     UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    SyncStatus TEXT DEFAULT 'pending'
+                    SyncStatus TEXT DEFAULT 'pending',
+                    SyncedAt DATETIME
                 );
             """)
+            
+            # Add SyncedAt column if it doesn't exist
+            try:
+                cursor.execute("SELECT SyncedAt FROM PriorityUpdates LIMIT 1")
+            except sqlite3.OperationalError:
+                print("Adding SyncedAt column to PriorityUpdates table")
+                cursor.execute("ALTER TABLE PriorityUpdates ADD COLUMN SyncedAt DATETIME")
             
             # PriorityConfig Table for priority customizations
             cursor.execute("""
@@ -1349,6 +1357,111 @@ class DatabaseService:
             return True
         except sqlite3.Error as e:
             print(f"Database error storing priority update: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_local_priority(self, jira_key: str) -> dict:
+        """Get the local priority override for a Jira issue."""
+        conn = self.get_connection()
+        if conn is None:
+            return None
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT PriorityId, PriorityName
+                FROM PriorityUpdates
+                WHERE JiraKey = ?
+                ORDER BY UpdatedAt DESC
+                LIMIT 1
+            """, (jira_key,))
+            
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'id': result[0],
+                    'name': result[1] if result[1] else result[0]
+                }
+            return None
+        except sqlite3.Error as e:
+            print(f"Database error getting local priority: {e}")
+            return None
+        finally:
+            conn.close()
+    
+    def set_local_priority(self, jira_key: str, priority_id: str, priority_name: str) -> bool:
+        """Set a local priority override for a Jira issue."""
+        return self.store_priority_update(jira_key, priority_id, priority_name)
+    
+    def remove_local_priority(self, jira_key: str) -> bool:
+        """Remove the local priority override for a Jira issue."""
+        conn = self.get_connection()
+        if conn is None:
+            return False
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM PriorityUpdates
+                WHERE JiraKey = ?
+            """, (jira_key,))
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"Database error removing local priority: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_all_priority_updates(self) -> list:
+        """Get all pending priority updates."""
+        conn = self.get_connection()
+        if conn is None:
+            return []
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT JiraKey, PriorityId, PriorityName, UpdatedAt
+                FROM PriorityUpdates
+                WHERE SyncStatus = 'pending'
+                ORDER BY UpdatedAt ASC
+            """)
+            
+            results = cursor.fetchall()
+            return [
+                {
+                    'jira_key': row[0],
+                    'priority_id': row[1],
+                    'priority_name': row[2],
+                    'updated_at': row[3]
+                }
+                for row in results
+            ]
+        except sqlite3.Error as e:
+            print(f"Database error getting priority updates: {e}")
+            return []
+        finally:
+            conn.close()
+    
+    def mark_priority_update_synced(self, jira_key: str) -> bool:
+        """Mark a priority update as synced."""
+        conn = self.get_connection()
+        if conn is None:
+            return False
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE PriorityUpdates
+                SET SyncStatus = 'synced', SyncedAt = datetime('now')
+                WHERE JiraKey = ?
+            """, (jira_key,))
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"Database error marking priority update as synced: {e}")
             return False
         finally:
             conn.close()
