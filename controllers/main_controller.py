@@ -240,15 +240,15 @@ class MainController(QObject):
                 key_item = self.view.jira_grid_view.table.item(row, 0)
                 if key_item:
                     issue_key = key_item.text()
-                    self._logger.info(f"[DEBUG] Riga selezionata: {row}, Issue Key: {issue_key}")
-                    self._logger.info(f"[DEBUG] Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
+                    self._logger.debug(f"[DEBUG] Riga selezionata: {row}, Issue Key: {issue_key}")
+                    self._logger.debug(f"[DEBUG] Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
                     # Verifica se la finestra di dettaglio è attualmente aperta
                     if issue_key in self.open_detail_windows:
                         detail_window = self.open_detail_windows[issue_key]
-                        self._logger.info(f"[DEBUG] La finestra di dettaglio per {issue_key} è attualmente aperta. IsVisible: {detail_window.isVisible()}, IsHidden: {detail_window.isHidden()}")
+                        self._logger.debug(f"[DEBUG] La finestra di dettaglio per {issue_key} è attualmente aperta. IsVisible: {detail_window.isVisible()}, IsHidden: {detail_window.isHidden()}")
                     # Tracciamento stack per vedere da dove viene chiamato
                     import traceback
-                    self._logger.info(f"[DEBUG] Stack trace:\n{traceback.format_stack()}")
+                    self._logger.debug(f"[DEBUG] Stack trace:\n{traceback.format_stack()}")
             except Exception as e:
                 self._logger.exception(f"[DEBUG] Errore durante l'elaborazione della selezione: {e}")
 
@@ -1568,10 +1568,10 @@ class MainController(QObject):
 
     def _ensure_detail_windows_visible(self):
         """Assicura che tutte le finestre di dettaglio siano visibili."""
-        self._logger.info(f"[DEBUG] Assicuro che tutte le {len(self.open_detail_windows)} finestre di dettaglio siano visibili")
+        self._logger.debug(f"[DEBUG] Assicuro che tutte le {len(self.open_detail_windows)} finestre di dettaglio siano visibili")
         for key, window in self.open_detail_windows.items():
             if window.isHidden():
-                self._logger.info(f"[DEBUG] Finestra {key} era nascosta, la rendo visibile")
+                self._logger.debug(f"[DEBUG] Finestra {key} era nascosta, la rendo visibile")
                 window.show()
                 window.raise_()
     
@@ -1584,10 +1584,10 @@ class MainController(QObject):
             windows.extend(detail_windows)
             # Add tracked dialog windows
             windows.extend(self._open_dialog_windows)
-            self._logger.info(f"[DEBUG] _get_open_dialog_windows: Finestre dettaglio={len(detail_windows)}, Altri dialoghi={len(self._open_dialog_windows)}")
+            self._logger.debug(f"[DEBUG] _get_open_dialog_windows: Finestre dettaglio={len(detail_windows)}, Altri dialoghi={len(self._open_dialog_windows)}")
             # Verifica stato finestre di dettaglio
             for key, window in self.open_detail_windows.items():
-                self._logger.info(f"[DEBUG] _get_open_dialog_windows - Stato finestra {key}: IsVisible={window.isVisible()}, IsActive={window.isActiveWindow()}")
+                self._logger.debug(f"[DEBUG] _get_open_dialog_windows - Stato finestra {key}: IsVisible={window.isVisible()}, IsActive={window.isActiveWindow()}")
                 
             # Assicuriamoci che le finestre di dettaglio siano sempre visibili
             self._ensure_detail_windows_visible()
@@ -1606,17 +1606,17 @@ class MainController(QObject):
 
     def _on_detail_window_closed(self, jira_key: str):
         """Removes the detail window from the tracking dictionary when it's closed."""
-        self._logger.info(f"[DEBUG] _on_detail_window_closed chiamato per: {jira_key}")
-        self._logger.info(f"[DEBUG] Finestre aperte prima della chiusura: {list(self.open_detail_windows.keys())}")
-        self._logger.info(f"[DEBUG] Backtrace:", stack_info=True)
+        self._logger.debug(f"[DEBUG] _on_detail_window_closed chiamato per: {jira_key}")
+        self._logger.debug(f"[DEBUG] Finestre aperte prima della chiusura: {list(self.open_detail_windows.keys())}")
+        self._logger.debug(f"[DEBUG] Backtrace:", stack_info=True)
         
         # Proteggiamo contro le chiamate doppie
         # Se riceviamo un segnale destroyed dopo che la finestra è già stata rimossa dal dizionario
         if jira_key in self.open_detail_windows:
             del self.open_detail_windows[jira_key]
-            self._logger.info(f"[DEBUG] Finestra di dettaglio {jira_key} rimossa dal tracking. Finestre rimaste: {list(self.open_detail_windows.keys())}")
+            self._logger.debug(f"[DEBUG] Finestra di dettaglio {jira_key} rimossa dal tracking. Finestre rimaste: {list(self.open_detail_windows.keys())}")
         else:
-            self._logger.info(f"[DEBUG] La finestra per {jira_key} era già stata rimossa o non era nel dizionario.")
+            self._logger.debug(f"[DEBUG] La finestra per {jira_key} era già stata rimossa o non era nel dizionario.")
     
     def _manage_detail_windows_limit(self):
         """Manages the limit of open detail windows, closing the oldest if necessary."""
@@ -1630,13 +1630,13 @@ class MainController(QObject):
         """Closes a specific detail window."""
         try:
             if jira_key in self.open_detail_windows:
-                self._logger.info(f"[DEBUG] _close_detail_window chiamato per: {jira_key}")
+                self._logger.debug(f"[DEBUG] _close_detail_window chiamato per: {jira_key}")
                 window = self.open_detail_windows[jira_key]
-                self._logger.info(f"[DEBUG] Stato finestra prima della chiusura: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}")
+                self._logger.debug(f"[DEBUG] Stato finestra prima della chiusura: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}")
                 
                 # Chi sta chiamando la chiusura?
                 import traceback
-                self._logger.info(f"[DEBUG] Backtrace della chiusura:\n{traceback.format_stack()}")
+                self._logger.debug(f"[DEBUG] Backtrace della chiusura:\n{traceback.format_stack()}")
                 
                 # Controllare che non ci siano chiusure durante la selezione della griglia
                 selected = self.view.jira_grid_view.table.selectedItems()
@@ -1645,13 +1645,13 @@ class MainController(QObject):
                     key_item = self.view.jira_grid_view.table.item(row, 0)
                     if key_item:
                         selected_key = key_item.text()
-                        self._logger.info(f"[DEBUG] Chiusura finestra mentre è selezionato: {selected_key}")
+                        self._logger.debug(f"[DEBUG] Chiusura finestra mentre è selezionato: {selected_key}")
                         if selected_key == jira_key:
                             self._logger.warning(f"[DEBUG] ATTENZIONE: Stiamo chiudendo la stessa finestra che è selezionata nella griglia!")
                 
-                self._logger.info(f"[DEBUG] Chiamando window.close() per {jira_key}")
+                self._logger.debug(f"[DEBUG] Chiamando window.close() per {jira_key}")
                 window.close()  # This will trigger the removal from the dictionary
-                self._logger.info(f"[DEBUG] window.close() eseguita per {jira_key}")
+                self._logger.debug(f"[DEBUG] window.close() eseguita per {jira_key}")
         except Exception as e:
             self._logger.error(f"Error closing detail window for {jira_key}: {e}")
             self._logger.exception(f"[DEBUG] Dettaglio errore per {jira_key}")
@@ -2008,36 +2008,36 @@ class MainController(QObject):
 
             # Log any rilevanti eventi che potrebbero causare la chiusura delle finestre
             if event.type() == QEvent.Type.WindowActivate:
-                self._logger.info(f"[DEBUG] WindowActivate event ricevuto da {watched}")
+                self._logger.debug(f"[DEBUG] WindowActivate event ricevuto da {watched}")
                 # Assicuriamoci che le finestre di dettaglio siano visibili in caso di attivazione di qualsiasi finestra
                 self._ensure_detail_windows_visible()
             elif event.type() == QEvent.Type.FocusIn:
-                self._logger.info(f"[DEBUG] FocusIn event ricevuto da {watched}")
+                self._logger.debug(f"[DEBUG] FocusIn event ricevuto da {watched}")
             elif event.type() == QEvent.Type.MouseButtonPress:
-                self._logger.info(f"[DEBUG] MouseButtonPress event ricevuto da {watched}")
+                self._logger.debug(f"[DEBUG] MouseButtonPress event ricevuto da {watched}")
                 # Log specifico per i click sulla tabella
                 if isinstance(watched, QTableWidget) or (hasattr(watched, 'table') and watched is self.view.jira_grid_view.table):
                     mouse_event = QMouseEvent(event)
                     pos = mouse_event.pos()
-                    self._logger.info(f"[DEBUG] Click sulla tabella rilevato a posizione ({pos.x()}, {pos.y()})")
-                    self._logger.info(f"[DEBUG] Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
+                    self._logger.debug(f"[DEBUG] Click sulla tabella rilevato a posizione ({pos.x()}, {pos.y()})")
+                    self._logger.debug(f"[DEBUG] Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
                     
                     # Tracciamento dello stato delle finestre di dettaglio
                     for key, window in self.open_detail_windows.items():
-                        self._logger.info(f"[DEBUG] Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}, IsModal={window.isModal()}, IsActive={window.isActiveWindow()}")
+                        self._logger.debug(f"[DEBUG] Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}, IsModal={window.isModal()}, IsActive={window.isActiveWindow()}")
 
                     # Assicuriamoci che le finestre di dettaglio rimangano visibili anche dopo il click sulla tabella
                     self._ensure_detail_windows_visible()
                     
                     # Tracciamento stack
                     import traceback
-                    self._logger.info(f"[DEBUG] Stack trace al click:\n{traceback.format_stack()}")
+                    self._logger.debug(f"[DEBUG] Stack trace al click:\n{traceback.format_stack()}")
             elif event.type() == QEvent.Type.MouseButtonRelease:
                 if isinstance(watched, QTableWidget) or (hasattr(watched, 'table') and watched is self.view.jira_grid_view.table):
-                    self._logger.info(f"[DEBUG] MouseButtonRelease sulla tabella")
+                    self._logger.debug(f"[DEBUG] MouseButtonRelease sulla tabella")
             elif event.type() == QEvent.Type.MouseButtonDblClick:
                 if isinstance(watched, QTableWidget) or (hasattr(watched, 'table') and watched is self.view.jira_grid_view.table):
-                    self._logger.info(f"[DEBUG] MouseButtonDblClick sulla tabella")
+                    self._logger.debug(f"[DEBUG] MouseButtonDblClick sulla tabella")
             
             if watched is self.view and event.type() == QEvent.Type.WindowActivate:
                 try:
@@ -2061,17 +2061,17 @@ class MainController(QObject):
         - Outputs: main window raised/activated; dialogs remain open and visible
         - Error modes: best-effort (exceptions are caught and logged)
         """
-        self._logger.info(f"[DEBUG] _on_main_activated chiamato. Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
+        self._logger.debug(f"[DEBUG] _on_main_activated chiamato. Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
         try:
             # First ensure all dialog windows remain visible and non-modal
             # This is critical to prevent them from being closed when main is activated
             try:
                 from PyQt6.QtCore import Qt
                 open_windows = self._get_open_dialog_windows()
-                self._logger.info(f"[DEBUG] Numero di finestre di dialogo aperte: {len(open_windows)}")
+                self._logger.debug(f"[DEBUG] Numero di finestre di dialogo aperte: {len(open_windows)}")
                 # Tracciamento dettagli finestre di dettaglio
                 for key, window in self.open_detail_windows.items():
-                    self._logger.info(f"[DEBUG] _on_main_activated - Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}, IsModal={window.isModal()}, IsActive={window.isActiveWindow()}")
+                    self._logger.debug(f"[DEBUG] _on_main_activated - Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}, IsModal={window.isModal()}, IsActive={window.isActiveWindow()}")
                 
                 for win in open_windows:
                     try:
@@ -2079,9 +2079,9 @@ class MainController(QObject):
                         try:
                             prev_modal = win.isModal()
                             win.setModal(False)
-                            self._logger.info(f"[DEBUG] Cambiato modal da {prev_modal} a False per {win}")
+                            self._logger.debug(f"[DEBUG] Cambiato modal da {prev_modal} a False per {win}")
                         except Exception as e:
-                            self._logger.info(f"[DEBUG] Errore nel cambiare modal state: {e}")
+                            self._logger.debug(f"[DEBUG] Errore nel cambiare modal state: {e}")
                             pass
                             
                         # Remove WindowStaysOnTopHint but don't recreate the window
@@ -2098,20 +2098,20 @@ class MainController(QObject):
                                     flags = flags & ~Qt.WindowType.WindowStaysOnTopHint
                                     # Remember the visibility state
                                     was_visible = win.isVisible()
-                                    self._logger.info(f"[DEBUG] Modificando window flag: Finestra {win} visibile: {was_visible}")
+                                    self._logger.debug(f"[DEBUG] Modificando window flag: Finestra {win} visibile: {was_visible}")
                                     win.setWindowFlags(flags)
                                     # Restore visibility if it was changed
                                     if was_visible and not win.isVisible():
-                                        self._logger.info(f"[DEBUG] La finestra {win} è stata nascosta dopo setWindowFlags, la rendo visibile")
+                                        self._logger.debug(f"[DEBUG] La finestra {win} è stata nascosta dopo setWindowFlags, la rendo visibile")
                                         win.show()
                                     
                                     # Doppio controllo sulla visibilità dopo le modifiche
-                                    self._logger.info(f"[DEBUG] Stato finestra dopo setWindowFlags: IsVisible={win.isVisible()}")
+                                    self._logger.debug(f"[DEBUG] Stato finestra dopo setWindowFlags: IsVisible={win.isVisible()}")
                             except Exception as e:
-                                self._logger.info(f"[DEBUG] Errore nella modifica delle flag di finestra: {e}")
+                                self._logger.debug(f"[DEBUG] Errore nella modifica delle flag di finestra: {e}")
                                 pass
                     except Exception as e:
-                        self._logger.info(f"[DEBUG] Errore nella gestione della finestra di dialogo: {e}")
+                        self._logger.debug(f"[DEBUG] Errore nella gestione della finestra di dialogo: {e}")
                         pass
             except Exception as e:
                 self._logger.exception(f'[DEBUG] Error preparing dialog windows: {e}')
@@ -2125,31 +2125,31 @@ class MainController(QObject):
                 pass
 
             # Salviamo lo stato di visibilità di tutte le finestre di dettaglio
-            self._logger.info(f"[DEBUG] Prima di processEvents - Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
+            self._logger.debug(f"[DEBUG] Prima di processEvents - Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
             for key, window in self.open_detail_windows.items():
                 # Forza la visibilità prima del processEvents per evitare che diventino invisibili
                 if window.isHidden():
-                    self._logger.info(f"[DEBUG] Forzando la visibilità della finestra {key} prima di processEvents")
+                    self._logger.debug(f"[DEBUG] Forzando la visibilità della finestra {key} prima di processEvents")
                     window.show()
-                self._logger.info(f"[DEBUG] Prima di processEvents - Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}")
+                self._logger.debug(f"[DEBUG] Prima di processEvents - Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}")
 
             # Allow the window system to process these changes immediately
             try:
                 from PyQt6.QtWidgets import QApplication
-                self._logger.info(f"[DEBUG] Chiamando QApplication.processEvents()")
+                self._logger.debug(f"[DEBUG] Chiamando QApplication.processEvents()")
                 QApplication.processEvents()
             except Exception as e:
-                self._logger.info(f"[DEBUG] Errore in processEvents: {e}")
+                self._logger.debug(f"[DEBUG] Errore in processEvents: {e}")
                 pass
                 
             # Verifica stato finestre di dettaglio dopo processEvents e ripristina la visibilità
-            self._logger.info(f"[DEBUG] Dopo processEvents - Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
+            self._logger.debug(f"[DEBUG] Dopo processEvents - Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
             for key, window in self.open_detail_windows.items():
-                self._logger.info(f"[DEBUG] Dopo processEvents - Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}")
+                self._logger.debug(f"[DEBUG] Dopo processEvents - Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}")
                 
                 # Ripristina SEMPRE la visibilità di tutte le finestre di dettaglio dopo processEvents
                 if window.isHidden():
-                    self._logger.info(f"[DEBUG] Ripristino visibilità per la finestra {key}")
+                    self._logger.debug(f"[DEBUG] Ripristino visibilità per la finestra {key}")
                     window.show()
                     window.raise_()
                     # Non attiviamo per non rubare il focus dalla finestra principale
@@ -2157,9 +2157,9 @@ class MainController(QObject):
                 
             # Log successful operation at debug level
             try:
-                self._logger.info(f"[DEBUG] Main window activated and raised; {len(self._get_open_dialog_windows())} dialog(s) remain open")
+                self._logger.debug(f"[DEBUG] Main window activated and raised; {len(self._get_open_dialog_windows())} dialog(s) remain open")
             except Exception as e:
-                self._logger.info(f"[DEBUG] Errore nel logging finale: {e}")
+                self._logger.debug(f"[DEBUG] Errore nel logging finale: {e}")
                 pass
         except Exception:
             logger.exception('Error while bringing main to front')
