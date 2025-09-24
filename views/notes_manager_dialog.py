@@ -549,9 +549,9 @@ class NotesManagerDialog(QDialog):
                 from PyQt6.QtGui import QCursor
                 menu = QMenu(self)
                 open_detail_action = menu.addAction("Apri dettaglio")
-                open_detail_action.setIcon(QIcon(FIF.LINK.path))
+                open_detail_action.setIcon(FIF.LINK)
                 start_timer_action = menu.addAction("Avvia timer")
-                start_timer_action.setIcon(QIcon(FIF.CLOCK.path))
+                start_timer_action.setIcon(FIF.CLOCK)
                 
                 # Mostra il menu contestuale al punto del click
                 action = menu.exec(QCursor.pos())

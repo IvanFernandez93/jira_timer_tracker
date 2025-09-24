@@ -161,6 +161,7 @@ class MainController(QObject):
         self.view.settingsRequested.connect(self._show_settings_dialog)
         self.view.searchJqlRequested.connect(self._show_jql_history_dialog)
         self.view.notesRequested.connect(self._show_notes_manager_dialog)
+        self.view.mentionsMeRequested.connect(self._show_mentions_me)
         self.view.syncQueueRequested.connect(self._show_sync_queue_dialog)
         self.view.notificationsRequested.connect(self._show_notifications_dialog)
         self.view.check_connection_requested.connect(self._check_connection_manually)
@@ -331,16 +332,31 @@ class MainController(QObject):
                 # Carichiamo i dati di base per questi preferiti
                 offline_issues = []
                 for key in favorite_keys:
-                    # Costruiamo un oggetto simile a quello che restituirebbe Jira
-                    # ma con i dati minimi disponibili localmente
-                    issue_data = {
-                        'key': key,
-                        'fields': {
-                            'summary': f"{key} (dati offline)",
-                            'status': {'name': 'Unknown'},
-                            'timespent': 0  # Useremo i dati locali
+                    # Prima cerchiamo nella cache locale
+                    cached_issue = self.db_service.get_jira_issue(key)
+                    
+                    if cached_issue:
+                        # Costruiamo l'oggetto con i dati dalla cache
+                        issue_data = {
+                            'key': key,
+                            'fields': {
+                                'summary': cached_issue['summary'],
+                                'status': {'name': cached_issue['status']},
+                                'priority': {'name': cached_issue['priority']},
+                                'timespent': 0  # Useremo i dati locali
+                            }
                         }
-                    }
+                    else:
+                        # Se non c'è nella cache, costruiamo un oggetto con dati minimi
+                        issue_data = {
+                            'key': key,
+                            'fields': {
+                                'summary': f"{key} (dati offline)",
+                                'status': {'name': 'Unknown'},
+                                'priority': {'name': 'Unknown'},
+                                'timespent': 0  # Useremo i dati locali
+                            }
+                        }
                     offline_issues.append(issue_data)
                 
                 # Chiamiamo direttamente il metodo di gestione dei dati caricati
@@ -432,6 +448,23 @@ class MainController(QObject):
         
         # Get all local times at once to avoid multiple DB calls in a loop
         local_times = self.db_service.get_all_local_times()
+        
+        # Save issue details to cache if we're online (only save real data from Jira)
+        if self.is_jira_available:
+            for issue in issues:
+                try:
+                    jira_key = issue.get('key')
+                    if jira_key:
+                        fields = issue.get('fields', {})
+                        summary = fields.get('summary', '')
+                        status = fields.get('status', {}).get('name', '')
+                        priority = fields.get('priority', {}).get('name', '')
+                        
+                        # Save to cache database
+                        self.db_service.save_jira_issue(jira_key, summary, status, priority)
+                except Exception as e:
+                    self._logger.warning(f"Failed to cache issue {jira_key}: {str(e)}")
+                    # Continue with next issue
 
         # Temporarily disconnect the filter signal to avoid re-filtering during population
         self.view.jira_grid_view.search_box.textChanged.disconnect(self._filter_grid)
@@ -492,6 +525,7 @@ class MainController(QObject):
         # Get priority information
         priority_data = issue_data.get('fields', {}).get('priority', {})
         priority_name = priority_data.get('name', '')
+        priority_id = priority_data.get('id', '')
         
         # Create items
         key_item = QTableWidgetItem(jira_key)
@@ -501,10 +535,10 @@ class MainController(QObject):
         time_item = QTableWidgetItem(time_str)
         
         # Apply status color if available
-        color_hex = self.db_service.get_status_color(status_name)
-        if color_hex:
+        status_color_hex = self.db_service.get_status_color(status_name)
+        if status_color_hex:
             from PyQt6.QtGui import QColor, QBrush
-            color = QColor(color_hex)
+            color = QColor(status_color_hex)
             # Use a lighter version of the color for better text visibility
             color.setAlpha(40)  # Semi-transparent
             brush = QBrush(color)
@@ -513,6 +547,21 @@ class MainController(QObject):
             status_item.setBackground(brush)
             priority_item.setBackground(brush)
             time_item.setBackground(brush)
+            
+        # Apply priority color if available
+        priority_color_hex = None
+        if priority_name:
+            priority_color_hex = self.db_service.get_priority_color(priority_name)
+        if not priority_color_hex and priority_id:
+            priority_color_hex = self.db_service.get_priority_color(priority_id)
+            
+        if priority_color_hex:
+            from PyQt6.QtGui import QColor, QBrush
+            color = QColor(priority_color_hex)
+            # Apply color directly to the priority cell with higher opacity
+            color.setAlpha(80)  # More visible for priority
+            brush = QBrush(color)
+            priority_item.setBackground(brush)
         
         # Add items to table
         table.setItem(row_position, 0, key_item)
@@ -1003,6 +1052,9 @@ class MainController(QObject):
             if jira_key in self.open_detail_windows:
                 self._logger.info(f"Window for {jira_key} already open, activating...")
                 self.open_detail_windows[jira_key].activateWindow()
+                # Ensure main window remains active and in front
+                self.view.raise_()
+                self.view.activateWindow()
                 return
                 
             # Limit the number of open detail windows to prevent too many open at once
@@ -1052,6 +1104,10 @@ class MainController(QObject):
             detail_window.show()
             detail_window.raise_()
             detail_window.activateWindow()
+            
+            # Ensure main window remains active and in front after showing detail window
+            self.view.raise_()
+            self.view.activateWindow()
         
         finally:
             # Always reset the flag
@@ -1156,81 +1212,45 @@ class MainController(QObject):
         self.load_jira_issues(append=False, favorite_keys=favorite_keys)
 
     def _adjust_window_flags_for_detail(self, detail_window):
-        """Ensure detail_window appears above main when main is always-on-top.
-
-        We avoid destructive flag resets. Sequence:
-        - First try a non-invasive approach:
-          * mark the detail window with WindowStaysOnTopHint, show/raise it and activate it
-          * reapply always-on-top to main then re-raise the detail to ensure stacking
-        - If that path fails, fall back to temporarily clearing the main's on-top, showing
-          the detail and reapplying main's on-top afterwards.
+        """Ensure detail_window appears correctly as a regular window.
+        
+        Modified to respect window independence and avoid forced always-on-top behavior.
         """
         try:
-            from PyQt6.QtCore import Qt, QTimer
-            from services.ui_utils import apply_always_on_top
-
-            # Non-invasive attempt: mark detail as temporary always-on-top and show it
+            from PyQt6.QtCore import Qt
+            
+            # Ensure detail is a proper top-level window with standard behavior
             try:
+                # Ensure it's a proper window
+                detail_window.setWindowFlag(Qt.WindowType.Window, True)
+                
+                # Ensure it's NOT always-on-top (for independence)
+                detail_window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+                
+                # Ensure it's not frameless or translucent
+                detail_window.setWindowFlag(Qt.WindowType.FramelessWindowHint, False)
+                
                 try:
-                    logger.debug("Attempt non-invasive raise: main flags=%s, main_opacity=%s",
-                                 int(self.view.windowFlags()),
-                                 self.view.windowOpacity() if hasattr(self.view, 'windowOpacity') else None)
+                    detail_window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
                 except Exception:
                     pass
-
-                # Ensure detail is top-level and not frameless/translucent
-                try:
-                    detail_window.setWindowFlag(Qt.WindowType.Window, True)
-                except Exception:
-                    pass
-                try:
-                    # Clear frameless hint using non-destructive API where available
-                    try:
-                        detail_window.setWindowFlag(Qt.WindowType.FramelessWindowHint, False)
-                    except Exception:
-                        # Fallback to bitmask change if needed
-                        df = detail_window.windowFlags() & ~Qt.WindowType.FramelessWindowHint
-                        detail_window.setWindowFlags(df)
-                except Exception:
-                    pass
-                try:
-                    detail_window.setAttribute(detail_window.WA_TranslucentBackground, False)
-                except Exception:
-                    pass
+                    
                 try:
                     detail_window.setWindowOpacity(1.0)
                 except Exception:
                     pass
-
-                # Give the detail window an on-top hint and show it
-                try:
-                    detail_window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-                except Exception:
-                    pass
-
-                detail_window.show()
-                detail_window.raise_()
-                detail_window.activateWindow()
-
-                # After a short delay reapply main always-on-top and then re-raise the detail
-                def _reapply_and_raise_detail():
-                    try:
-                        # Reapply flags but do not force a raise on main; we'll re-raise the detail
-                        from services.ui_utils import apply_always_on_top
-                        apply_always_on_top(self.view, self.app_settings, raise_window=False)
-                    except Exception:
-                        logger.exception('Failed to reapply always-on-top on main (non-invasive path)')
-                    try:
-                        # ensure the detail stays above by raising it again
-                        detail_window.raise_()
-                        detail_window.activateWindow()
-                    except Exception:
-                        pass
-
-                QTimer.singleShot(200, _reapply_and_raise_detail)
-                return
             except Exception:
-                logger.exception('Non-invasive raise failed, falling back to temporary main toggle')
+                logger.exception('Failed to set window flags for detail window')
+                
+            # Show and activate the window
+            detail_window.show()
+            detail_window.raise_()
+            detail_window.activateWindow()
+            
+            # Let the OS handle window stacking from now on
+            return
+        except Exception:
+            logger.exception('Window adjustment failed')
 
             # Fallback: temporarily clear always-on-top on main, normalize detail and show it,
             # then reapply main always-on-top after a short delay.
@@ -1332,6 +1352,9 @@ class MainController(QObject):
             if issue_key in self.open_detail_windows:
                 self._logger.info(f"Window for {issue_key} already open via double-click, activating...")
                 self.open_detail_windows[issue_key].activateWindow()
+                # Ensure main window remains active and in front
+                self.view.raise_()
+                self.view.activateWindow()
                 return
                 
             # Limit the number of open detail windows to prevent too many open at once
@@ -1391,6 +1414,10 @@ class MainController(QObject):
             detail_window.show()
             detail_window.raise_()
             detail_window.activateWindow()
+            
+            # Ensure main window remains active and in front after showing detail window
+            self.view.raise_()
+            self.view.activateWindow()
         
         finally:
             # Always reset the flag
@@ -1425,6 +1452,9 @@ class MainController(QObject):
         # Check if a window for this issue is already open
         if last_active_key in self.open_detail_windows:
             self.open_detail_windows[last_active_key].activateWindow()
+            # Ensure main window remains active and in front
+            self.view.raise_()
+            self.view.activateWindow()
             return
             
         # Limit the number of open detail windows to prevent too many open at once
@@ -1467,6 +1497,10 @@ class MainController(QObject):
         detail_window.show()
         detail_window.raise_()
         detail_window.activateWindow()
+        
+        # Ensure main window remains active and in front after showing detail window
+        self.view.raise_()
+        self.view.activateWindow()
 
 
     def _on_timer_started(self, started_key: str):
@@ -1834,6 +1868,10 @@ class MainController(QObject):
             controller = self.open_detail_windows[jira_key].controller
             if not controller.is_running:
                 controller.start_timer()
+            
+            # Ensure main window remains active and in front
+            self.view.raise_()
+            self.view.activateWindow()
         else:
             # Limit the number of open detail windows to prevent too many open at once
             MAX_DETAIL_WINDOWS = 3  # Allow up to 3 detail windows open simultaneously
@@ -1876,6 +1914,10 @@ class MainController(QObject):
             # Start the timer
             detail_controller.start_timer()
             
+            # Ensure main window remains active and in front after showing detail window
+            self.view.raise_()
+            self.view.activateWindow()
+            
     def _start_timer_from_notes(self, jira_key: str):
         """Starts a timer for a Jira issue selected from the notes manager using the mini timer dialog.
         
@@ -1888,6 +1930,9 @@ class MainController(QObject):
             # Mostra e attiva la finestra già esistente
             self.open_detail_windows[jira_key].show()
             self.open_detail_windows[jira_key].activateWindow()
+            # Assicuriamo che la finestra principale rimanga in primo piano
+            self.view.raise_()
+            self.view.activateWindow()
             return
             
         # Limit the number of open detail windows to prevent too many open at once
@@ -1955,6 +2000,10 @@ class MainController(QObject):
             from functools import partial
             destroy_handler = partial(self._on_detail_window_closed, jira_key)
             mini_timer_controller.view.destroyed.connect(destroy_handler)
+            
+            # Assicuriamo che la finestra principale rimanga in primo piano
+            self.view.raise_()
+            self.view.activateWindow()
             
             self._logger.debug(f"Mini timer started for {jira_key} from notes (fittizio: {is_fictional})")
             
@@ -2050,119 +2099,41 @@ class MainController(QObject):
         return super().eventFilter(watched, event)
 
     def _on_main_activated(self):
-        """Bring main to front and ensure dialogs remain open when main is activated.
+        """Handle main window activation.
         
-        When the main window is activated (clicked), we ensure it comes to the front
-        without closing any other dialogs. We also make sure dialogs don't have 
-        WindowStaysOnTopHint which would prevent main from appearing above them.
-
-        Contract:
-        - Inputs: none (uses self.view and tracked dialog lists)
-        - Outputs: main window raised/activated; dialogs remain open and visible
-        - Error modes: best-effort (exceptions are caught and logged)
+        Modified to respect window independence. When the main window is activated,
+        we no longer try to manipulate other windows to maintain a specific z-order.
         """
         self._logger.debug(f"[DEBUG] _on_main_activated chiamato. Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
         try:
-            # First ensure all dialog windows remain visible and non-modal
-            # This is critical to prevent them from being closed when main is activated
+            # We still ensure all dialog windows are non-modal to prevent unexpected modal behavior
             try:
-                from PyQt6.QtCore import Qt
                 open_windows = self._get_open_dialog_windows()
                 self._logger.debug(f"[DEBUG] Numero di finestre di dialogo aperte: {len(open_windows)}")
-                # Tracciamento dettagli finestre di dettaglio
-                for key, window in self.open_detail_windows.items():
-                    self._logger.debug(f"[DEBUG] _on_main_activated - Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}, IsModal={window.isModal()}, IsActive={window.isActiveWindow()}")
                 
                 for win in open_windows:
                     try:
                         # Make dialog non-modal if it isn't already
                         try:
-                            prev_modal = win.isModal()
-                            win.setModal(False)
-                            self._logger.debug(f"[DEBUG] Cambiato modal da {prev_modal} a False per {win}")
-                        except Exception as e:
-                            self._logger.debug(f"[DEBUG] Errore nel cambiare modal state: {e}")
-                            pass
-                            
-                        # Remove WindowStaysOnTopHint but don't recreate the window
-                        # This allows main to appear above when needed
-                        try:
-                            win.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+                            if win.isModal():
+                                win.setModal(False)
                         except Exception:
-                            try:
-                                # Fallback to bitwise operation only if setWindowFlag isn't available
-                                # BUT IMPORTANTLY: we split the operation to ensure visibility is preserved
-                                flags = win.windowFlags()
-                                if bool(flags & Qt.WindowType.WindowStaysOnTopHint):
-                                    # Only if the flag is actually set, change it
-                                    flags = flags & ~Qt.WindowType.WindowStaysOnTopHint
-                                    # Remember the visibility state
-                                    was_visible = win.isVisible()
-                                    self._logger.debug(f"[DEBUG] Modificando window flag: Finestra {win} visibile: {was_visible}")
-                                    win.setWindowFlags(flags)
-                                    # Restore visibility if it was changed
-                                    if was_visible and not win.isVisible():
-                                        self._logger.debug(f"[DEBUG] La finestra {win} è stata nascosta dopo setWindowFlags, la rendo visibile")
-                                        win.show()
-                                    
-                                    # Doppio controllo sulla visibilità dopo le modifiche
-                                    self._logger.debug(f"[DEBUG] Stato finestra dopo setWindowFlags: IsVisible={win.isVisible()}")
-                            except Exception as e:
-                                self._logger.debug(f"[DEBUG] Errore nella modifica delle flag di finestra: {e}")
-                                pass
-                    except Exception as e:
-                        self._logger.debug(f"[DEBUG] Errore nella gestione della finestra di dialogo: {e}")
+                            pass
+                    except Exception:
                         pass
             except Exception as e:
                 self._logger.exception(f'[DEBUG] Error preparing dialog windows: {e}')
                 pass
 
-            # Now raise the main window
-            from services.ui_utils import apply_always_on_top
+            # Let the OS handle window stacking
+            # Just log active status for tracking
             try:
-                apply_always_on_top(self.view, self.app_settings, raise_window=True)
-            except Exception:
-                pass
-
-            # Salviamo lo stato di visibilità di tutte le finestre di dettaglio
-            self._logger.debug(f"[DEBUG] Prima di processEvents - Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
-            for key, window in self.open_detail_windows.items():
-                # Forza la visibilità prima del processEvents per evitare che diventino invisibili
-                if window.isHidden():
-                    self._logger.debug(f"[DEBUG] Forzando la visibilità della finestra {key} prima di processEvents")
-                    window.show()
-                self._logger.debug(f"[DEBUG] Prima di processEvents - Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}")
-
-            # Allow the window system to process these changes immediately
-            try:
-                from PyQt6.QtWidgets import QApplication
-                self._logger.debug(f"[DEBUG] Chiamando QApplication.processEvents()")
-                QApplication.processEvents()
-            except Exception as e:
-                self._logger.debug(f"[DEBUG] Errore in processEvents: {e}")
-                pass
-                
-            # Verifica stato finestre di dettaglio dopo processEvents e ripristina la visibilità
-            self._logger.debug(f"[DEBUG] Dopo processEvents - Finestre di dettaglio aperte: {list(self.open_detail_windows.keys())}")
-            for key, window in self.open_detail_windows.items():
-                self._logger.debug(f"[DEBUG] Dopo processEvents - Stato finestra {key}: IsVisible={window.isVisible()}, IsHidden={window.isHidden()}")
-                
-                # Ripristina SEMPRE la visibilità di tutte le finestre di dettaglio dopo processEvents
-                if window.isHidden():
-                    self._logger.debug(f"[DEBUG] Ripristino visibilità per la finestra {key}")
-                    window.show()
-                    window.raise_()
-                    # Non attiviamo per non rubare il focus dalla finestra principale
-                    # window.activateWindow()
-                
-            # Log successful operation at debug level
-            try:
-                self._logger.debug(f"[DEBUG] Main window activated and raised; {len(self._get_open_dialog_windows())} dialog(s) remain open")
+                self._logger.debug(f"[DEBUG] Main window activated; {len(self._get_open_dialog_windows())} dialog(s) remain open")
             except Exception as e:
                 self._logger.debug(f"[DEBUG] Errore nel logging finale: {e}")
                 pass
         except Exception:
-            logger.exception('Error while bringing main to front')
+            logger.exception('Error in _on_main_activated')
             
     def _update_sync_status(self):
         """Updates the sync status indicator with current counts."""
@@ -2231,6 +2202,82 @@ class MainController(QObject):
             import traceback
             self._logger.error(traceback.format_exc())
             
+    def _check_jira_connection(self, feature_name="This feature"):
+        """Checks if Jira is connected and shows an error if not."""
+        if not self.jira_service or not self.jira_service.is_connected():
+            QMessageBox.warning(
+                self.view,
+                "Connessione Jira richiesta",
+                f"{feature_name} richiede una connessione attiva a Jira.\n"
+                "Configura la connessione nelle impostazioni e riprova."
+            )
+            return False
+        return True
+        
+    def _show_mentions_me(self):
+        """Shows issues that mention the current user."""
+        if not self._check_jira_connection("Mentions Me"):
+            return
+        
+        # Show loading dialog or indicator
+        self.view.jira_grid_view.show_loading(True)
+        self.view.jira_grid_view.clear_table()
+        
+        # Create a JQL query for mentions - using text search since 'mentions' field isn't available
+        # The error shows that 'mentions' field doesn't exist in this Jira instance
+        current_user = self.jira_service.jira.myself().get('displayName', '')
+        username = self.jira_service.jira.myself().get('name', '')
+        
+        # Use text search instead of mentions
+        mentions_jql = f'text ~ "{current_user}" OR text ~ "{username}" ORDER BY updated DESC'
+        
+        # Create a worker to fetch mentions in background
+        worker = JiraWorker(self.jira_service, mentions_jql, 0, 100)
+        thread = QThread()
+        worker.moveToThread(thread)
+        
+        # Connect signals and start thread
+        thread.started.connect(worker.run)
+        worker.finished.connect(lambda issues: self._on_mentions_loaded({"issues": issues}))
+        worker.error.connect(lambda error: self._on_mentions_error(error))
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        
+        # Keep references
+        self._active_threads.append(thread)
+        self._active_workers.append(worker)
+        
+        # Start the thread
+        thread.start()
+        
+    def _on_mentions_loaded(self, result):
+        """Handle loaded mentions."""
+        self.view.jira_grid_view.show_loading(False)
+        
+        if not result:
+            self.view.jira_grid_view.show_info("Nessuna menzione", "Non sono stati trovati ticket che ti menzionano.")
+            return
+            
+        # Check if there's an error in the result
+        if "error" in result:
+            self.view.jira_grid_view.show_error("Errore", f"Errore durante il recupero delle menzioni: {result['error']}")
+            return
+            
+        # Process the results
+        issues = result.get("issues", [])
+        if not issues:
+            self.view.jira_grid_view.show_info("Nessuna menzione", "Non sono stati trovati ticket che ti menzionano.")
+            return
+            
+        self.current_issues = issues
+        self.data_loaded.emit(issues)
+        
+    def _on_mentions_error(self, error):
+        """Handle error loading mentions."""
+        self.view.jira_grid_view.show_loading(False)
+        self.view.jira_grid_view.show_error(f"Impossibile recuperare le menzioni: {error}")
+    
     def _show_notifications_dialog(self):
         """Shows the notifications dialog."""
         try:

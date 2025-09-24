@@ -45,13 +45,10 @@ class JiraDetailView(QDialog):
         self.setWindowTitle(f"Detail - {jira_key}")
         self.setGeometry(150, 150, 900, 700)
         self.setModal(False)  # Allow multiple detail dialogs to be open
-
-        # If parent has 'always on top', inherit that flag so this window also stays on top
-        try:
-            if parent is not None and parent.windowFlags() & Qt.WindowType.WindowStaysOnTopHint:
-                self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        except Exception:
-            pass
+        self.setWindowFlag(Qt.WindowType.Window, True)  # Ensure it's a top-level window
+        
+        # Non ereditiamo più il flag always on top dal parent
+        # In questo modo ogni finestra sarà indipendente
 
         main_layout = QVBoxLayout(self)
 
@@ -95,6 +92,15 @@ class JiraDetailView(QDialog):
         self.timer_label.setAlignment(Qt.AlignmentFlag.AlignRight)
 
         header_layout.addWidget(self.jira_key_label)
+        
+        # Add button to open Jira link in browser
+        self.open_jira_btn = QPushButton("🔗 Apri in Jira")
+        self.open_jira_btn.setToolTip("Apri questo ticket nel browser")
+        self.open_jira_btn.setFixedHeight(28)
+        self.open_jira_btn.setStyleSheet(
+            'padding:4px; border-radius:4px; background:#fff; border:1px solid #ddd;'
+        )
+        header_layout.addWidget(self.open_jira_btn)
         header_layout.addWidget(self.notification_btn)
         
         # Add priority controls to header
@@ -259,8 +265,20 @@ class JiraDetailView(QDialog):
         self.add_note_btn.setStyleSheet("font-size: 14px; padding: 6px 10px;")
         # The controller will handle creating new notes; do not create a
         # view-local note here to avoid duplicate tabs and mismatched editors.
-
+        
         annotations_layout.addWidget(self.add_note_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        
+        # Separazione visiva
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        annotations_layout.addWidget(separator)
+        
+        # Add button for showing mentions - in a separate layout for visibility
+        self.show_mentions_btn = QPushButton("Show Tickets Mentioning Me")
+        self.show_mentions_btn.setToolTip("Display tickets where your username is mentioned in comments")
+        self.show_mentions_btn.setStyleSheet("font-size: 14px; padding: 6px 10px; background-color: #f0f8ff;")
+        annotations_layout.addWidget(self.show_mentions_btn)
 
         # Install the annotations tab
         self.tab_widget.addTab(self.annotations_tab, "Personal Notes")
@@ -453,6 +471,7 @@ class JiraDetailView(QDialog):
         thumbnail_label.setFixedSize(64, 64)
         thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         thumbnail_label.setStyleSheet("border: 1px solid #ccc; background-color: #f9f9f9;")
+        thumbnail_label.setCursor(Qt.CursorShape.PointingHandCursor)  # Cambia il cursore per indicare che è cliccabile
         
         # Determine file type and set appropriate icon/thumbnail
         file_extension = filename.lower().split('.')[-1] if '.' in filename else ''
@@ -463,25 +482,27 @@ class JiraDetailView(QDialog):
         if file_extension in image_extensions:
             # For images, we'll load thumbnail later
             thumbnail_label.setText("🖼️")
-            thumbnail_label.setStyleSheet("border: 1px solid #ccc; background-color: #e8f4fd; font-size: 24px;")
+            thumbnail_label.setStyleSheet("border: 1px solid #ccc; background-color: #e8f4fd; font-size: 24px; cursor: pointer;")
         elif file_extension in video_extensions:
             thumbnail_label.setText("🎥")
-            thumbnail_label.setStyleSheet("border: 1px solid #ccc; background-color: #ffe8e8; font-size: 24px;")
+            thumbnail_label.setStyleSheet("border: 1px solid #ccc; background-color: #ffe8e8; font-size: 24px; cursor: pointer;")
         elif file_extension in audio_extensions:
             thumbnail_label.setText("🎵")
-            thumbnail_label.setStyleSheet("border: 1px solid #ccc; background-color: #e8ffe8; font-size: 24px;")
+            thumbnail_label.setStyleSheet("border: 1px solid #ccc; background-color: #e8ffe8; font-size: 24px; cursor: pointer;")
         else:
             # Default document icon
             thumbnail_label.setText("📄")
-            thumbnail_label.setStyleSheet("border: 1px solid #ccc; background-color: #f9f9f9; font-size: 24px;")
+            thumbnail_label.setStyleSheet("border: 1px solid #ccc; background-color: #f9f9f9; font-size: 24px; cursor: pointer;")
         
         layout.addWidget(thumbnail_label)
         
         # File info
         info_layout = QVBoxLayout()
         
-        # Filename and size
+        # Filename and size - rendi cliccabile anche il nome del file
         filename_label = QLabel(f"<b>{filename}</b> ({size_kb:.1f} KB)")
+        filename_label.setCursor(Qt.CursorShape.PointingHandCursor)  # Cambia il cursore per indicare che è cliccabile
+        filename_label.setStyleSheet("color: #0066cc; text-decoration: none;")
         info_layout.addWidget(filename_label)
         
         # Progress bar (initially hidden)
@@ -495,10 +516,22 @@ class JiraDetailView(QDialog):
         layout.addLayout(info_layout)
         layout.addStretch()
         
+        # Bottoni per le azioni
+        buttons_layout = QHBoxLayout()
+        
+        # Open in browser button
+        open_browser_btn = QPushButton("🌐")
+        open_browser_btn.setFixedWidth(30)
+        open_browser_btn.setToolTip("Apri nel browser")
+        buttons_layout.addWidget(open_browser_btn)
+        
         # Download button
-        download_btn = QPushButton("Download")
-        download_btn.setFixedWidth(80)
-        layout.addWidget(download_btn)
+        download_btn = QPushButton("📥")
+        download_btn.setFixedWidth(30)
+        download_btn.setToolTip("Scarica")
+        buttons_layout.addWidget(download_btn)
+        
+        layout.addLayout(buttons_layout)
         
         # Store references for later use
         container.attachment_data = attachment_data
@@ -507,24 +540,19 @@ class JiraDetailView(QDialog):
         container.status_label = thumbnail_label  # Reuse for status (will be updated)
         container.progress_bar = progress_bar
         container.download_btn = download_btn
+        container.open_browser_btn = open_browser_btn
+        container.filename_label = filename_label
         
         return container
 
     def mousePressEvent(self, event):
-        # ensure window is raised and activated when clicked anywhere inside
-        try:
-            self.raise_()
-            self.activateWindow()
-        except Exception:
-            pass
+        # Comportamento standard: lasciamo che il sistema operativo gestisca il focus delle finestre
+        # Non forziamo più la finestra in primo piano
         return super().mousePressEvent(event)
 
     def focusInEvent(self, event):
-        try:
-            self.raise_()
-            self.activateWindow()
-        except Exception:
-            pass
+        # Comportamento standard: lasciamo che il sistema operativo gestisca il focus delle finestre
+        # Non forziamo più alcun comportamento speciale
         return super().focusInEvent(event)
 
     def _open_emoji_picker(self):

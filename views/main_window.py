@@ -19,6 +19,7 @@ class MainWindow(FluentWindow):
     settingsRequested = pyqtSignal()
     searchJqlRequested = pyqtSignal()
     notesRequested = pyqtSignal()
+    mentionsMeRequested = pyqtSignal()
     syncQueueRequested = pyqtSignal()
     notificationsRequested = pyqtSignal()
     closing = pyqtSignal()  # Signal emitted when window is closing
@@ -90,6 +91,16 @@ class MainWindow(FluentWindow):
             onClick=self.onNotesClicked
         )
         self.notes_item.setToolTip("Visualizza tutte le note in una griglia")
+        
+        # Mentions Me button
+        self.mentions_me_item = self.navigationInterface.addItem(
+            "mentions_me",
+            FIF.MENTION,
+            "Mentions Me",
+            position=NavigationItemPosition.TOP,
+            onClick=self.onMentionsMeClicked
+        )
+        self.mentions_me_item.setToolTip("Visualizza tutti i ticket che mi citano")
 
         # Sync Queue button
         self.navigationInterface.addSeparator()
@@ -123,6 +134,10 @@ class MainWindow(FluentWindow):
     @pyqtSlot()
     def onNotesClicked(self):
         self.notesRequested.emit()
+    
+    @pyqtSlot()
+    def onMentionsMeClicked(self):
+        self.mentionsMeRequested.emit()
 
     @pyqtSlot()
     def onSettingsClicked(self):
@@ -246,6 +261,26 @@ class MainWindow(FluentWindow):
         super().changeEvent(event)
 
     def closeEvent(self, event):
-        """Override the closeEvent to emit closing signal."""
+        """Override to emit closing signal."""
         self.closing.emit()
-        super().closeEvent(event)
+        event.accept()
+        
+    def mousePressEvent(self, event):
+        """Assicura che la finestra principale venga portata in primo piano quando viene cliccata."""
+        try:
+            # Portiamo questa finestra in primo piano quando viene cliccata
+            self.raise_()
+            self.activateWindow()
+        except Exception:
+            pass
+        # Chiamiamo il metodo della classe base per gestire normalmente l'evento
+        return super().mousePressEvent(event)
+        
+    def focusInEvent(self, event):
+        """Assicura che la finestra principale venga attivata correttamente quando riceve il focus."""
+        try:
+            self.raise_()
+            self.activateWindow()
+        except Exception:
+            pass
+        return super().focusInEvent(event)

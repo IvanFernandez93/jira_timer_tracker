@@ -7,6 +7,7 @@ from datetime import datetime
 import os
 import requests
 import markdown
+import webbrowser
 
 from services.jira_service import JiraService
 from views.markdown_editor import MarkdownEditor
@@ -40,20 +41,14 @@ class AttachmentDownloadWorker(QThread):
                 return
                 
             filename = self.attachment_data.get('filename')
-            file_url = self.attachment_data.get('content')
+            attachment_id = self.attachment_data.get('id')
             
-            if not file_url:
-                self.download_error.emit(self.attachment_widget, "URL mancante")
+            if not attachment_id:
+                self.download_error.emit(self.attachment_widget, "ID allegato mancante")
                 return
             
             # Update status to downloading
             self.progress_updated.emit(self.attachment_widget, 0)
-            
-            # Get the attachment content with progress tracking
-            response = self.jira_service.jira._session.get(file_url, stream=True, timeout=30)
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
             
             # Determine save path
             from PyQt6.QtCore import QStandardPaths
@@ -63,21 +58,16 @@ class AttachmentDownloadWorker(QThread):
             # Ensure the directory exists
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             
-            downloaded_size = 0
-            with open(save_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if self.is_cancelled:
-                        f.close()
-                        os.remove(save_path)  # Clean up partial download
-                        return
-                        
-                    if chunk:
-                        f.write(chunk)
-                        downloaded_size += len(chunk)
-                        
-                        if total_size > 0:
-                            progress = int((downloaded_size / total_size) * 100)
-                            self.progress_updated.emit(self.attachment_widget, progress)
+            # Use the direct Jira API to download the attachment
+            import asyncio
+            success = asyncio.run(self.jira_service.download_attachment(attachment_id, save_path))
+            
+            if not success:
+                self.download_error.emit(self.attachment_widget, "Download fallito")
+                return
+                
+            # Report 100% progress
+            self.progress_updated.emit(self.attachment_widget, 100)
             
             self.download_finished.emit(self.attachment_widget, save_path)
             
@@ -111,38 +101,53 @@ class ThumbnailDownloadWorker(QThread):
                 return
                 
             filename = self.attachment_data.get('filename')
-            file_url = self.attachment_data.get('content')
+            attachment_id = self.attachment_data.get('id')
             
-            if not file_url:
-                self.thumbnail_error.emit(self.attachment_widget, "URL mancante")
+            if not attachment_id:
+                self.thumbnail_error.emit(self.attachment_widget, "ID allegato mancante")
                 return
             
-            # Download the image
-            response = self.jira_service.jira._session.get(file_url, stream=True, timeout=30)
-            response.raise_for_status()
+            # Create a temporary file to download the image
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp_file:
+                temp_path = tmp_file.name
             
-            # Read image data
-            image_data = response.content
+            # Download the image using Jira API
+            import asyncio
+            success = asyncio.run(self.jira_service.download_attachment(attachment_id, temp_path))
             
+            if not success:
+                self.thumbnail_error.emit(self.attachment_widget, "Download thumbnail fallito")
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                return
+                
             if self.is_cancelled:
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
                 return
             
-            # Create QPixmap from image data
+            # Create QPixmap from the temporary file
             from PyQt6.QtGui import QPixmap
-            from PyQt6.QtCore import QBuffer, QIODevice
             
             pixmap = QPixmap()
-            buffer = QBuffer()
-            buffer.setData(image_data)
-            buffer.open(QIODevice.OpenModeFlag.ReadOnly)
-            
-            if pixmap.loadFromData(image_data):
+            if pixmap.load(temp_path):
                 # Scale to thumbnail size (64x64) maintaining aspect ratio
                 thumbnail = pixmap.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio, 
                                         Qt.TransformationMode.SmoothTransformation)
                 self.thumbnail_ready.emit(self.attachment_widget, thumbnail)
             else:
                 self.thumbnail_error.emit(self.attachment_widget, "Impossibile caricare l'immagine")
+                
+            # Clean up temporary file
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
             
         except Exception as e:
             if not self.is_cancelled:
@@ -424,6 +429,9 @@ class JiraDetailController(QObject):
         self.view.stop_btn.clicked.connect(self._stop_timer)
         self.view.add_time_btn.clicked.connect(self._add_time_manually)
         
+        # Open in Jira button
+        self.view.open_jira_btn.clicked.connect(self._open_jira_in_browser)
+        
         # Notification button
         self.view.notification_btn.clicked.connect(self._toggle_notification_subscription)
         
@@ -437,6 +445,9 @@ class JiraDetailController(QObject):
         # Attachment signals
         self.view.upload_attachment_btn.clicked.connect(self._upload_attachment)
         self.view.download_selected_btn.clicked.connect(self._download_selected_attachments)
+        
+        # Mentions button
+        self.view.show_mentions_btn.clicked.connect(self._show_mentions_grid)
         self.view.download_all_btn.clicked.connect(self._download_all_attachments)
         
         # Additional attachment button for managing attachments through the dialog
@@ -477,6 +488,54 @@ class JiraDetailController(QObject):
             loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.view.attachments_layout.addWidget(loading_label)
             
+            # Check if Jira is available
+            if not self.jira_service.is_connected():
+                # Offline mode - use cached data
+                cached_issue = self.db_service.get_jira_issue(self.jira_key)
+                if cached_issue:
+                    # Create a mock issue data structure with cached data
+                    self._issue_data = {
+                        'key': self.jira_key,
+                        'fields': {
+                            'summary': cached_issue['summary'],
+                            'status': {'name': cached_issue['status']},
+                            'priority': {'name': cached_issue['priority']},
+                            'description': f"Visualizzazione offline. I dettagli completi saranno disponibili quando la connessione a Jira sarà ripristinata.",
+                            'issuetype': {'name': 'Task'},
+                            'project': {'name': 'Offline', 'key': ''},
+                            'creator': {'displayName': 'Unknown (offline)'},
+                            'assignee': {'displayName': 'Unknown (offline)'},
+                            'reporter': {'displayName': 'Unknown (offline)'}
+                        }
+                    }
+                    
+                    # Populate what we can
+                    self._populate_details()
+                    self.view.comments_browser.setHtml("<p><i>I commenti non sono disponibili in modalità offline.</i></p>")
+                    
+                    # Show empty attachments
+                    self._clear_attachment_widgets()
+                    no_attachments_label = QLabel("Gli allegati non sono disponibili in modalità offline.")
+                    no_attachments_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.view.attachments_layout.addWidget(no_attachments_label)
+                else:
+                    # No cached data available
+                    self.view.details_browser.setHtml(f"<p><i>Nessun dato disponibile per {self.jira_key} in modalità offline.</i></p>")
+                    self.view.comments_browser.setHtml("<p><i>I commenti non sono disponibili in modalità offline.</i></p>")
+                    
+                    # Show empty attachments
+                    self._clear_attachment_widgets()
+                    no_attachments_label = QLabel("Gli allegati non sono disponibili in modalità offline.")
+                    no_attachments_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.view.attachments_layout.addWidget(no_attachments_label)
+                
+                # Load other data that doesn't depend on issue details
+                self._populate_annotations()
+                self._load_time_history()
+                self._update_notification_button()
+                return
+            
+            # Online mode - load from Jira
             # Cancel any existing issue detail loader
             if self._issue_detail_loader_worker:
                 self._issue_detail_loader_worker.cancel()
@@ -509,8 +568,107 @@ class JiraDetailController(QObject):
         
         # Use raw description field for markdown conversion
         description_md = fields.get('description', 'No description.')
-        # Convert Jira's markup to HTML
-        description_html = markdown.markdown(description_md or "")
+        # Convert Jira's markup to HTML with proper handling of embedded media
+        description_html = markdown.markdown(description_md or "", extensions=['tables', 'fenced_code'])
+        
+        # Process image links to make them viewable
+        # Check for image pattern in the description - ![alt text](image_url)
+        import re
+        image_pattern = r'!\[(.*?)\]\((.*?)\)'
+        
+        # Process description HTML to replace image markdown with actual <img> tags
+        if re.search(image_pattern, description_md or ""):
+            for match in re.finditer(image_pattern, description_md or ""):
+                alt_text = match.group(1)
+                image_url = match.group(2)
+                # Create an HTML img tag with the image URL and alt text
+                img_tag = f'<img src="{image_url}" alt="{alt_text}" style="max-width:100%;">'
+                description_html = description_html.replace(match.group(0), img_tag)
+
+        # Formatta le date di creazione e aggiornamento
+        created_date = "N/A"
+        updated_date = "N/A"
+        
+        if fields.get('created'):
+            try:
+                # Parse the UTC datetime
+                dt_object = datetime.fromisoformat(fields.get('created').replace('Z', '+00:00'))
+                # Convert to local time
+                local_dt = dt_object.astimezone()
+                # Format for display with local timezone
+                created_date = local_dt.strftime('%d %b %Y at %H:%M')
+            except Exception as e:
+                _logger.error(f"Error formatting created date: {e}")
+                
+        if fields.get('updated'):
+            try:
+                # Parse the UTC datetime
+                dt_object = datetime.fromisoformat(fields.get('updated').replace('Z', '+00:00'))
+                # Convert to local time
+                local_dt = dt_object.astimezone()
+                # Format for display with local timezone
+                updated_date = local_dt.strftime('%d %b %Y at %H:%M')
+            except Exception as e:
+                _logger.error(f"Error formatting updated date: {e}")
+        
+        # Ottieni il creatore
+        creator = fields.get('creator', {}).get('displayName', 'Unknown')
+        
+        # Ottieni il progetto
+        project = fields.get('project', {}).get('name', 'N/A')
+        project_key = fields.get('project', {}).get('key', '')
+        project_html = f"{project} ({project_key})" if project_key else project
+        
+        # Ottieni i partecipanti (watchers) se disponibili
+        watchers_count = fields.get('watches', {}).get('watchCount', 0)
+        
+        # If there are watchers, get the detailed list
+        watchers_html = ""
+        if watchers_count > 0 and self.jira_service.is_connected():
+            try:
+                # Get the issue key
+                issue_key = self._issue_data.get('key')
+                if issue_key:
+                    watchers_list = self.jira_service.get_issue_watchers(issue_key)
+                    if watchers_list:
+                        # Format watchers list for display
+                        watchers_names = [w['name'] for w in watchers_list]
+                        watchers_str = ", ".join(watchers_names)
+                        watchers_html = f"<p><b>Watchers:</b> {watchers_str}</p>"
+                    else:
+                        watchers_html = f"<p><b>Watchers:</b> {watchers_count}</p>"
+                else:
+                    watchers_html = f"<p><b>Watchers:</b> {watchers_count}</p>"
+            except Exception as e:
+                _logger.error(f"Error getting watchers: {e}")
+                watchers_html = f"<p><b>Watchers:</b> {watchers_count}</p>"
+        elif watchers_count > 0:
+            watchers_html = f"<p><b>Watchers:</b> {watchers_count}</p>"
+        
+        # Aggiungi gli utenti coinvolti (reporter, assignee, commentatori)
+        involved_users = set()
+        
+        # Reporter
+        if fields.get('reporter', {}).get('displayName'):
+            involved_users.add(fields.get('reporter', {}).get('displayName'))
+            
+        # Assignee
+        if fields.get('assignee', {}).get('displayName'):
+            involved_users.add(fields.get('assignee', {}).get('displayName'))
+            
+        # Creator (potrebbe essere già incluso come reporter)
+        if creator != 'Unknown':
+            involved_users.add(creator)
+            
+        # Commentatori
+        comments = self._issue_data.get('fields', {}).get('comment', {}).get('comments', [])
+        for comment in comments:
+            if comment.get('author', {}).get('displayName'):
+                involved_users.add(comment.get('author', {}).get('displayName'))
+                
+        # Converti il set in una lista ordinata e crea l'HTML
+        involved_users_list = sorted(list(involved_users))
+        involved_users_html = ", ".join(involved_users_list)
 
         # Build an HTML string for the details view
         html = f"""
@@ -519,7 +677,14 @@ class JiraDetailController(QObject):
             <p><b>Type:</b> {fields.get('issuetype', {}).get('name', 'N/A')}</p>
             <p><b>Status:</b> {fields.get('status', {}).get('name', 'N/A')}</p>
             <p><b>Priority:</b> {fields.get('priority', {}).get('name', 'N/A')}</p>
+            <p><b>Project:</b> {project_html}</p>
+            <p><b>Created:</b> {created_date}</p>
+            <p><b>Updated:</b> {updated_date}</p>
+            <p><b>Creator:</b> {creator}</p>
             <p><b>Assignee:</b> {fields.get('assignee', {}).get('displayName', 'Unassigned')}</p>
+            <p><b>Reporter:</b> {fields.get('reporter', {}).get('displayName', 'None')}</p>
+            {watchers_html}
+            <p><b>Participants:</b> {involved_users_html}</p>
             <hr>
             <h3>Description:</h3>
             {description_html}
@@ -645,6 +810,11 @@ class JiraDetailController(QObject):
             filename = attachment.get('filename', 'Unknown')
             size_kb = attachment.get('size', 0) / 1024
             
+            # Verifica che l'allegato contenga l'ID per il download
+            if not attachment.get('id'):
+                _logger.error(f"Attachment is missing ID: {filename}")
+                continue
+                
             # Create attachment widget
             attachment_widget = self.view.create_attachment_widget(filename, size_kb, attachment)
             self.view.attachments_layout.addWidget(attachment_widget)
@@ -654,6 +824,15 @@ class JiraDetailController(QObject):
             attachment_widget.download_btn.clicked.connect(
                 lambda checked, widget=attachment_widget: self._download_single_attachment(widget)
             )
+            
+            # Connect open in browser button
+            attachment_widget.open_browser_btn.clicked.connect(
+                lambda checked, widget=attachment_widget: self._open_attachment_in_browser(widget)
+            )
+            
+            # Connect thumbnail and filename clicks to open in browser
+            attachment_widget.thumbnail_label.mousePressEvent = lambda event, widget=attachment_widget: self._handle_attachment_click(event, widget)
+            attachment_widget.filename_label.mousePressEvent = lambda event, widget=attachment_widget: self._handle_attachment_click(event, widget)
             
             # Check if this is an image file for thumbnail generation
             file_extension = filename.lower().split('.')[-1] if '.' in filename else ''
@@ -710,6 +889,71 @@ class JiraDetailController(QObject):
         self._thumbnail_workers.clear()
         
         # Clear pending queues
+        
+    def _open_attachment_in_browser(self, attachment_widget):
+        """Opens the attachment in the browser."""
+        attachment_data = attachment_widget.attachment_data
+        content_url = attachment_data.get('content')
+        
+        if content_url:
+            try:
+                webbrowser.open(content_url)
+            except Exception as e:
+                QMessageBox.warning(self.view, "Errore", f"Impossibile aprire l'allegato nel browser: {str(e)}")
+                _logger.error(f"Errore nell'apertura dell'allegato nel browser: {e}")
+        else:
+            QMessageBox.warning(self.view, "Errore", "URL dell'allegato non disponibile")
+    
+    def _show_mentions_grid(self):
+        """Opens a grid view showing tickets with mentions of the current user."""
+        try:
+            # Check if Jira is connected
+            if not self.jira_service.is_connected():
+                QMessageBox.warning(self.view, "Connection Error", "Please connect to Jira to show mentions.")
+                return
+            
+            # Get user info to display in the title
+            user_info = self.jira_service.jira.myself()
+            username = user_info.displayName if hasattr(user_info, 'displayName') else (user_info.name if hasattr(user_info, 'name') else 'Current User')
+            
+            # Create view and controller for the mentions grid
+            from views.mentions_grid_view import MentionsGridView
+            from controllers.mentions_grid_controller import MentionsGridController
+            
+            # Create view
+            view = MentionsGridView(parent=self.view)
+            view.setWindowTitle(f"Tickets Mentioning {username}")
+            
+            # Create controller and populate with data
+            controller = MentionsGridController(view, self.jira_service)
+            controller.load_mentions()
+            
+            # Show the view as a modal dialog
+            view.exec()
+            
+        except Exception as e:
+            QMessageBox.critical(self.view, "Error", f"Failed to load mentions: {e}")
+            _logger.error(f"Error in _show_mentions_grid: {e}")
+
+    def _open_jira_in_browser(self):
+        """Opens the current Jira ticket in the default browser."""
+        try:
+            # Costruisce l'URL del ticket Jira
+            issue_url = f"{self.jira_service.jira.server_url}/browse/{self.jira_key}"
+            
+            # Apre l'URL nel browser predefinito
+            webbrowser.open(issue_url)
+        except Exception as e:
+            QMessageBox.warning(self.view, "Errore", f"Impossibile aprire il ticket nel browser: {str(e)}")
+            _logger.error(f"Errore nell'apertura del ticket nel browser: {e}")
+    
+    def _handle_attachment_click(self, event, attachment_widget):
+        """Handle clicks on attachment thumbnail or filename."""
+        # Gestire il click sull'etichetta dell'allegato
+        self._open_attachment_in_browser(attachment_widget)
+        
+        # Chiamare il metodo mousePressEvent originale se necessario
+        # super(type(attachment_widget.thumbnail_label), attachment_widget.thumbnail_label).mousePressEvent(event)
         self._pending_thumbnail_widgets.clear()
         self._pending_download_widgets.clear()
         
@@ -728,15 +972,65 @@ class JiraDetailController(QObject):
         self.view.notes_tab_widget.clear()
         annotations = self.db_service.get_annotations(self.jira_key)
         
+        drafts_to_recover = []
+        
         if not annotations:
             self._add_new_note_tab(title="Note 1")
         else:
             for title, content in annotations:
-                self._create_note_tab(title, content)
+                # Check if there's a draft version newer than the saved content
+                draft_content = self.db_service.get_draft(self.jira_key, title)
+                
+                if draft_content:
+                    # Store the info for later processing
+                    drafts_to_recover.append((title, draft_content, content))
+                    # Create the tab with the saved content for now
+                    self._create_note_tab(title, content)
+                else:
+                    # No draft, just create the tab with saved content
+                    self._create_note_tab(title, content)
+        
+        # Handle drafts after all tabs are created
+        if drafts_to_recover:
+            # Delay slightly to ensure UI is responsive
+            QTimer.singleShot(500, lambda: self._process_drafts(drafts_to_recover))
         
         # Set up the autosave timer for the first tab
         if self.view.notes_tab_widget.count() > 0:
             self._handle_note_tab_change(0)
+            
+    def _process_drafts(self, drafts_info):
+        """Process draft recovery after tabs are created."""
+        # Ask once about recovering drafts
+        if drafts_info:
+            reply = QMessageBox.question(
+                self.view, 
+                "Recover Drafts", 
+                f"Found {len(drafts_info)} unsaved draft(s). Do you want to recover them?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                # Process each draft
+                for title, draft_content, _ in drafts_info:
+                    # Find the tab with this title
+                    for i in range(self.view.notes_tab_widget.count()):
+                        if self.view.notes_tab_widget.tabText(i) == title:
+                            editor = self.view.notes_tab_widget.widget(i)
+                            
+                            # Set the draft content
+                            if hasattr(editor, 'setMarkdown'):
+                                editor.setMarkdown(draft_content)
+                            elif hasattr(editor, 'setPlainText'):
+                                editor.setPlainText(draft_content)
+                            
+                            # Immediately save it to the database
+                            self._current_note_title = title
+                            self._active_note_editor = editor
+                            self._save_current_note()
+                            
+                            break
 
     def _setup_autosave_timer(self):
         """Create a single-shot autosave timer (debounce) for note editing.
@@ -745,27 +1039,50 @@ class JiraDetailController(QObject):
         _save_current_note after a short delay.
         """
         try:
-            # 2 second debounce
+            # 2 second debounce for draft save
             self.autosave_timer = QTimer(self)
             self.autosave_timer.setSingleShot(True)
             self.autosave_timer.setInterval(2000)
-            self.autosave_timer.timeout.connect(self._save_current_note)
-        except Exception:
+            self.autosave_timer.timeout.connect(self._save_current_note_draft)
+            
+            # 10 second debounce for actual save to database
+            self.full_save_timer = QTimer(self)
+            self.full_save_timer.setSingleShot(True)
+            self.full_save_timer.setInterval(10000)  # 10 seconds
+            self.full_save_timer.timeout.connect(self._save_current_note)
+        except Exception as e:
             # Ensure controller still initializes even if timers are unavailable
+            _logger.error(f"Failed to setup autosave timer: {e}")
             if hasattr(self, 'autosave_timer'):
                 delattr(self, 'autosave_timer')
+            if hasattr(self, 'full_save_timer'):
+                delattr(self, 'full_save_timer')
 
-    def _save_current_note(self):
-        """Save the currently active note to the DB safely.
-
-        Supports both MarkdownEditor and QTextEdit. Uses the
-        controller's db_service.save_annotation API.
+    def _save_current_note_draft(self):
+        """Save the currently active note as a draft.
+        
+        This is triggered more frequently for real-time autosave functionality.
         """
         try:
             if not self._active_note_editor or not self._current_note_title:
                 return
 
-            content = ""
+            content = self._get_note_content()
+            if content:
+                # Persist to drafts DB
+                self.db_service.save_draft(self.jira_key, self._current_note_title, content)
+                # Also start the timer for the full save
+                if hasattr(self, 'full_save_timer'):
+                    self.full_save_timer.start()
+        except Exception as e:
+            _logger.error(f"Error saving note draft: {e}")
+            # Best-effort save; do not raise from UI timer
+            pass
+    
+    def _get_note_content(self):
+        """Helper method to get content from the active note editor."""
+        content = ""
+        try:
             # MarkdownEditor compatibility
             if hasattr(self._active_note_editor, 'toMarkdown'):
                 content = self._active_note_editor.toMarkdown()
@@ -777,11 +1094,54 @@ class JiraDetailController(QObject):
                     content = self._active_note_editor.document().toPlainText()
                 except Exception:
                     content = ""
+        except Exception as e:
+            _logger.error(f"Error getting note content: {e}")
+        
+        return content
+            
+    def _save_current_note(self):
+        """Save the currently active note to the DB safely.
 
-            # Persist to DB
-            self.db_service.save_annotation(self.jira_key, self._current_note_title, content)
-        except Exception:
+        Supports both MarkdownEditor and QTextEdit. Uses the
+        controller's db_service.save_annotation API.
+        """
+        try:
+            if not self._active_note_editor or not self._current_note_title:
+                return
+
+            content = self._get_note_content()
+            if content:
+                # Persist to DB
+                self.db_service.save_annotation(self.jira_key, self._current_note_title, content)
+                
+                # Delete the draft since we've saved the full version
+                try:
+                    self.db_service.delete_draft(self.jira_key, self._current_note_title)
+                except Exception:
+                    pass
+                    
+                # Mostra un feedback visivo temporaneo che indica che la nota è stata salvata
+                self._show_save_indicator()
+        except Exception as e:
+            _logger.error(f"Error saving note: {e}")
             # Best-effort save; do not raise from UI timer
+            pass
+    
+    def _show_save_indicator(self):
+        """Shows a temporary visual indicator that the note was saved."""
+        # Implementa un indicatore visibile ma non invasivo che la nota è stata salvata
+        try:
+            # Ottieni l'indice della scheda corrente
+            current_index = self.view.notes_tab_widget.currentIndex()
+            if current_index >= 0:
+                # Ottieni il testo della scheda
+                tab_text = self.view.notes_tab_widget.tabText(current_index)
+                # Mostra un indicatore temporaneo nel testo della scheda
+                self.view.notes_tab_widget.setTabText(current_index, f"{tab_text} ✓")
+                
+                # Ripristina il testo originale dopo 2 secondi
+                QTimer.singleShot(2000, lambda: self.view.notes_tab_widget.setTabText(current_index, tab_text))
+        except Exception:
             pass
 
     def _create_note_tab(self, title, content):
@@ -809,23 +1169,41 @@ class JiraDetailController(QObject):
                 QMessageBox.warning(self.view, "Duplicate Note", f"A note with the title '{title}' already exists.")
                 return
 
+        # Check if there is a draft version
+        draft_content = self.db_service.get_draft(self.jira_key, title)
+        initial_content = ""
+        
+        if draft_content:
+            # Ask user if they want to recover the draft
+            reply = QMessageBox.question(
+                self.view, 
+                "Draft Found", 
+                f"A draft version of '{title}' was found. Do you want to recover it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                initial_content = draft_content
+        
         # Create a new empty note in the database first
-        self.db_service.save_annotation(self.jira_key, title, "")
+        self.db_service.save_annotation(self.jira_key, title, initial_content)
 
         # Create the editor and add the tab
-        editor = self._create_note_tab(title, "")
+        editor = self._create_note_tab(title, initial_content)
         
         # Switch to the new tab, which will trigger _handle_note_tab_change
         index = self.view.notes_tab_widget.indexOf(editor)
         self.view.notes_tab_widget.setCurrentIndex(index)
 
-        # Explicitly set the current note title and connect the auto-save timer
+        # Explicitly set the current note title and connect the auto-save timers
         self._current_note_title = title
         if hasattr(self, 'autosave_timer'):
             self._active_note_editor = editor
+            # Connect to draft autosave timer (runs every 2 seconds)
             self._active_note_editor.textChanged.connect(self.autosave_timer.start)
-            # Also save immediately on text change to avoid data loss
-            self._active_note_editor.textChanged.connect(self._save_current_note)
+            # Connect to full save timer (runs after 10 seconds of inactivity)
+            self._active_note_editor.textChanged.connect(self.full_save_timer.start)
 
     def _remove_note_tab(self, index):
         """Removes a note tab and deletes it from the database."""
@@ -853,12 +1231,19 @@ class JiraDetailController(QObject):
 
     def _handle_note_tab_change(self, index):
         """Saves the previous tab and sets up the autosave timer for the new one."""
-        # Disconnect the textChanged signal from the old editor to prevent auto-saving an empty string
-        if self._active_note_editor and hasattr(self, 'autosave_timer'):
-            try:
-                self._active_note_editor.textChanged.disconnect(self.autosave_timer.start)
-            except TypeError:
-                pass # Was not connected
+        # Disconnect the textChanged signals from the old editor
+        if self._active_note_editor:
+            if hasattr(self, 'autosave_timer'):
+                try:
+                    self._active_note_editor.textChanged.disconnect(self.autosave_timer.start)
+                except (TypeError, RuntimeError):
+                    pass # Was not connected
+                    
+            if hasattr(self, 'full_save_timer'):
+                try:
+                    self._active_note_editor.textChanged.disconnect(self.full_save_timer.start)
+                except (TypeError, RuntimeError):
+                    pass # Was not connected
 
         # Save the content of the note that was active before the switch
         self._save_current_note()
@@ -894,22 +1279,36 @@ class JiraDetailController(QObject):
                     empty_text = ""
 
             if empty_text == "":
-                annotations = self.db_service.get_annotations(self.jira_key)
-                for ann_title, ann_content in annotations:
-                    if ann_title == self._current_note_title:
-                        self._active_note_editor.blockSignals(True)
-                        self._active_note_editor.setMarkdown(ann_content)
-                        self._active_note_editor.blockSignals(False)
-                        break
+                # Check if there's a draft version first
+                draft_content = self.db_service.get_draft(self.jira_key, self._current_note_title)
+                
+                if draft_content:
+                    # Load the draft version
+                    self._active_note_editor.blockSignals(True)
+                    self._active_note_editor.setMarkdown(draft_content)
+                    self._active_note_editor.blockSignals(False)
+                else:
+                    # Load from regular annotations
+                    annotations = self.db_service.get_annotations(self.jira_key)
+                    for ann_title, ann_content in annotations:
+                        if ann_title == self._current_note_title:
+                            self._active_note_editor.blockSignals(True)
+                            self._active_note_editor.setMarkdown(ann_content)
+                            self._active_note_editor.blockSignals(False)
+                            break
 
-            # Connect the textChanged signal to the new editor's timer and immediate save
+            # Connect the textChanged signals to the timers
             if hasattr(self, 'autosave_timer'):
                 try:
+                    # Connect to draft autosave (2 seconds)
                     self._active_note_editor.textChanged.connect(self.autosave_timer.start)
                 except Exception:
                     pass
+                    
+            if hasattr(self, 'full_save_timer'):
                 try:
-                    self._active_note_editor.textChanged.connect(self._save_current_note)
+                    # Connect to full save (10 seconds)
+                    self._active_note_editor.textChanged.connect(self.full_save_timer.start)
                 except Exception:
                     pass
 
@@ -1806,6 +2205,21 @@ class JiraDetailController(QObject):
             # Store the issue data
             self._issue_data = issue_data
             
+            # Save issue details in local cache for offline mode
+            try:
+                jira_key = issue_data.get('key')
+                if jira_key:
+                    fields = issue_data.get('fields', {})
+                    summary = fields.get('summary', '')
+                    status = fields.get('status', {}).get('name', '')
+                    priority = fields.get('priority', {}).get('name', '')
+                    
+                    # Save to cache database
+                    self.db_service.save_jira_issue(jira_key, summary, status, priority)
+            except Exception as cache_e:
+                print(f"Error saving issue to cache: {cache_e}")
+                # Continue with display even if caching fails
+            
             # Populate the view with the data
             self._populate_details()
             self._populate_comments()
@@ -1923,11 +2337,14 @@ class JiraDetailController(QObject):
         return f"{hours:02}:{minutes:02}:{seconds:02}"
 
     def _create_or_update_auto_note(self):
-        """Create or update the auto-generated note with issue details."""
+        """Create or update the auto-generated note with issue details. Now with version tracking."""
         if not self._issue_data:
             return
             
-        auto_note_title = "Auto: Issue Details"
+        import hashlib
+        import json
+        from datetime import datetime
+            
         fields = self._issue_data.get('fields', {})
         
         # Build the note content
@@ -1950,8 +2367,6 @@ class JiraDetailController(QObject):
         created = fields.get('created')
         if created:
             try:
-                from datetime import datetime
-                
                 # Parse the UTC datetime and convert to local time
                 dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
                 local_dt = dt.astimezone()  # Senza argomenti, astimezone converte al fuso orario locale
@@ -1964,8 +2379,6 @@ class JiraDetailController(QObject):
         updated = fields.get('updated')
         if updated:
             try:
-                from datetime import datetime
-                
                 # Parse the UTC datetime and convert to local time
                 dt = datetime.fromisoformat(updated.replace('Z', '+00:00'))
                 local_dt = dt.astimezone()  # Senza argomenti, astimezone converte al fuso orario locale
@@ -1989,20 +2402,131 @@ class JiraDetailController(QObject):
         content_lines.append("## Links")
         content_lines.append("*Loading issue links...*")
         
+        # Create the content without hash for comparison
         content = "\n".join(content_lines)
+        auto_note_title = "Auto: Issue Details"
         
         # Check if auto note already exists
         existing_notes = self.db_service.get_notes_by_jira_key(self.jira_key)
-        auto_note_exists = any(note['title'] == auto_note_title for note in existing_notes)
         
-        if auto_note_exists:
-            # Update existing auto note
-            for note in existing_notes:
-                if note['title'] == auto_note_title:
-                    self.db_service.update_note(note['id'], content=content)
+        # Separate the main note and versioned notes
+        main_note = None
+        versioned_notes = []
+        
+        for note in existing_notes:
+            if note['title'] == auto_note_title:
+                main_note = note
+            elif note['title'].startswith("Auto: Issue Details v"):
+                versioned_notes.append(note)
+        
+        # Sort versioned notes by version number (highest first)
+        def get_version(note):
+            try:
+                return int(note['title'].split("v")[1])
+            except:
+                return 0
+                
+        versioned_notes.sort(key=get_version, reverse=True)
+        
+        # Function to normalize content for comparison - make it less sensitive to whitespace
+        # and other formatting differences
+        def normalize_content(content_text):
+            if not content_text:
+                return ""
+                
+            # Remove any hidden hash comments
+            if "<!-- Issue data hash: " in content_text:
+                content_text = content_text.split("<!-- Issue data hash: ")[0]
+                
+            # Extract only the significant content
+            # This focuses on extracting only key information for comparison:
+            # - Summary
+            # - Issue Key
+            # - Type
+            # - Status
+            # - Priority
+            # - Assignee
+            # - Description (without caring about whitespace)
+            result = {}
+            
+            # Extract Summary (first heading)
+            import re
+            summary_match = re.search(r'#\s*(.*?)(?=\n|$)', content_text)
+            if summary_match:
+                result['summary'] = summary_match.group(1).strip()
+            
+            # Extract Key, Type, Status, Priority, Assignee
+            for field in ['Key', 'Type', 'Status', 'Priority', 'Assignee']:
+                pattern = r'\*\*' + field + r'\*\*:\s*(.*?)(?=\n|$)'
+                match = re.search(pattern, content_text)
+                if match:
+                    result[field.lower()] = match.group(1).strip()
+            
+            # Extract Description (normalize whitespace)
+            desc_pattern = r'## Description\s*(.*?)(?=\n##|\Z)'
+            desc_match = re.search(desc_pattern, content_text, re.DOTALL)
+            if desc_match:
+                # Normalize whitespace in description
+                desc = desc_match.group(1).strip()
+                # Remove all whitespace to make comparison less sensitive
+                desc = re.sub(r'\s+', '', desc)
+                result['description'] = desc
+                
+            return result
+            
+        # First check if the main note exists
+        if main_note:
+            # Compare content using normalized values
+            main_content_norm = normalize_content(main_note['content'])
+            new_content_norm = normalize_content(content)
+            
+            # Check if the significant parts are the same
+            significant_changes = False
+            
+            # Compare all extracted fields
+            for key in set(main_content_norm.keys()) | set(new_content_norm.keys()):
+                main_value = main_content_norm.get(key, '')
+                new_value = new_content_norm.get(key, '')
+                
+                # If values are different for any key field, consider it a significant change
+                if main_value != new_value:
+                    significant_changes = True
                     break
+            
+            if not significant_changes:
+                # No significant changes detected, update timestamp but don't create new version
+                self.db_service.update_note(main_note['id'], content=content)
+                return
+            else:
+                # Significant changes detected, create a new version
+                version = 1
+                if versioned_notes:
+                    version = get_version(versioned_notes[0]) + 1
+                
+                # Create a new versioned note
+                new_title = f"Auto: Issue Details v{version}"
+                self.db_service.create_note(
+                    jira_key=self.jira_key,
+                    title=new_title,
+                    content=content,
+                    tags="auto-generated,issue-details,version-history"
+                )
+                
+                # Also update the main note with the latest content
+                self.db_service.update_note(main_note['id'], content=content)
+                return
+        elif versioned_notes:
+            # No main note, but we have versioned notes
+            # Create a new main note with the current content
+            self.db_service.create_note(
+                jira_key=self.jira_key,
+                title=auto_note_title,
+                content=content,
+                tags="auto-generated,issue-details"
+            )
+            return
         else:
-            # Create new auto note
+            # No notes exist at all, create the first one
             self.db_service.create_note(
                 jira_key=self.jira_key,
                 title=auto_note_title,

@@ -191,10 +191,10 @@ class AttachmentService:
             # Determine where to save the file
             file_path = self.get_attachment_path(jira_key, attachment_id, filename)
             
-            # Download the file from Jira
+            # Download the file from Jira - rimuovo i parametri nominati per evitare conflitti
             success = await self.jira_service.download_attachment(
-                attachment_id=attachment_id,
-                file_path=file_path
+                attachment_id, 
+                file_path
             )
             
             if not success:

@@ -4,7 +4,7 @@ import logging
 logger = logging.getLogger('JiraTimeTracker')
 
 
-def apply_always_on_top(window, app_settings=None, raise_window: bool = True):
+def apply_always_on_top(window, app_settings=None, raise_window: bool = True, force_disabled: bool = False):
     """Apply or remove the WindowStaysOnTopHint on a window based on settings.
 
     Args:
@@ -15,6 +15,8 @@ def apply_always_on_top(window, app_settings=None, raise_window: bool = True):
             perform raise()/activateWindow(), which is useful when callers want to
             control stacking order themselves (e.g. show a detail window above the main
             window without main stealing focus).
+        force_disabled: when True, always disable the WindowStaysOnTopHint flag regardless
+            of settings. This is useful for making windows behave independently.
 
     This function manipulates the flags explicitly (adds or removes the hint)
     and refreshes the window by calling show() where appropriate. It avoids blind
@@ -23,14 +25,18 @@ def apply_always_on_top(window, app_settings=None, raise_window: bool = True):
     """
     try:
         enabled = False
-        if app_settings is None:
+        if app_settings is None or force_disabled:
             # Can't construct AppSettings without DB service here; leave disabled
+            # Or if force_disabled is True, keep enabled as False
             app_settings = None
-
-        if app_settings:
+        elif app_settings:
             try:
                 enabled = app_settings.get_setting('always_on_top', 'false').lower() == 'true'
             except Exception:
+                enabled = False
+            
+            # Override enabled if force_disabled is True
+            if force_disabled:
                 enabled = False
 
         from PyQt6.QtCore import Qt

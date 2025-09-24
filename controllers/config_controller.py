@@ -3,6 +3,8 @@ from services.jira_service import JiraService
 from services.app_settings import AppSettings
 from services.credential_service import CredentialService
 from controllers.status_color_controller import StatusColorController
+from controllers.priority_config_controller import PriorityConfigController
+from controllers.priority_color_config_controller import PriorityColorConfigController
 from controllers.jql_history_controller import JqlHistoryController
 from PyQt6.QtCore import pyqtSignal
 
@@ -28,6 +30,9 @@ class ConfigController:
         
         # Connect status color configuration button
         self.view.status_color_btn.clicked.connect(self._open_status_color_dialog)
+        
+        # Connect priority color configuration button
+        self.view.priority_color_btn.clicked.connect(self._open_priority_color_dialog)
         
         # Connect JQL history button
         self.view.jql_history_btn.clicked.connect(self._open_jql_history_dialog)
@@ -191,8 +196,19 @@ class ConfigController:
             return
         # Parent dialogs to the main window to ensure correct stacking
         parent = self.view if hasattr(self, 'view') else None
-        color_controller = StatusColorController(self.db_service, parent=parent)
-        color_controller.run()
+        color_controller = StatusColorController(self.db_service, parent)
+        color_controller.run()  # Usa run() invece di show_dialog()
+        # No need to handle the result as changes are saved directly to the database
+        
+    def _open_priority_color_dialog(self):
+        """Opens the priority color configuration dialog."""
+        if not self.db_service:
+            self.view.show_error("Servizio database non disponibile.")
+            return
+        # Parent dialogs to the main window to ensure correct stacking
+        parent = self.view if hasattr(self, 'view') else None
+        priority_controller = PriorityColorConfigController(self.db_service)
+        priority_controller.show_dialog(parent)
         # No need to handle the result as changes are saved directly to the database
         
     def _open_jql_history_dialog(self):

@@ -193,6 +193,29 @@ class DatabaseService:
                 );
             """)
             
+            # Drafts Table - For autosave of notes
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS Drafts (
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    JiraKey TEXT NOT NULL,
+                    Title TEXT NOT NULL,
+                    Content TEXT,
+                    UpdatedAt DATETIME,
+                    UNIQUE(JiraKey, Title)
+                );
+            """)
+            
+            # JiraIssueCache Table - For storing Jira issue details offline
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS JiraIssueCache (
+                    JiraKey TEXT PRIMARY KEY NOT NULL,
+                    Summary TEXT,
+                    Status TEXT,
+                    Priority TEXT,
+                    UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            
             # StatusColorMappings Table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS StatusColorMappings (
@@ -636,6 +659,66 @@ class DatabaseService:
                 self.delete_note_soft(result[0])
         finally:
             conn.close()
+            
+    def save_draft(self, jira_key: str, title: str, content: str):
+        """Saves a draft version of a note."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            # Check if draft already exists
+            cursor.execute("SELECT Id FROM Drafts WHERE JiraKey = ? AND Title = ?", (jira_key, title))
+            result = cursor.fetchone()
+            
+            # Get current timestamp
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+            
+            if result:
+                # Update existing draft
+                cursor.execute(
+                    "UPDATE Drafts SET Content = ?, UpdatedAt = ? WHERE Id = ?",
+                    (content, current_time, result[0])
+                )
+            else:
+                # Create new draft
+                cursor.execute(
+                    "INSERT INTO Drafts (JiraKey, Title, Content, UpdatedAt) VALUES (?, ?, ?, ?)",
+                    (jira_key, title, content, current_time)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    
+    def get_draft(self, jira_key: str, title: str) -> str:
+        """Gets the draft content for a specific note if it exists."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT Content FROM Drafts WHERE JiraKey = ? AND Title = ?", (jira_key, title))
+            result = cursor.fetchone()
+            return result[0] if result else None
+        finally:
+            conn.close()
+            
+    def delete_draft(self, jira_key: str, title: str):
+        """Deletes a draft when it's no longer needed."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM Drafts WHERE JiraKey = ? AND Title = ?", (jira_key, title))
+            conn.commit()
+        finally:
+            conn.close()
+            
+    def check_table_exists(self, table_name):
+        """Check if a table exists in the database."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
 
     def rename_annotation(self, jira_key: str, old_title: str, new_title: str):
         """Renames an annotation title (legacy method)."""
@@ -908,6 +991,84 @@ class DatabaseService:
             cursor = conn.cursor()
             cursor.execute('SELECT StatusName, ColorHex FROM StatusColorMappings')
             return cursor.fetchall()
+        finally:
+            conn.close()
+            
+    def get_status_colors(self) -> list:
+        """Gets all status color mappings."""
+        return self.get_all_status_colors()
+    
+    def save_status_colors(self, status_colors: list):
+        """Save all status color mappings."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            # Clear existing mappings
+            cursor.execute('DELETE FROM StatusColorMappings')
+            # Insert new mappings
+            for status_name, color_hex in status_colors:
+                if color_hex:  # Only insert if color is specified
+                    cursor.execute(
+                        'INSERT INTO StatusColorMappings (StatusName, ColorHex) VALUES (?, ?)',
+                        (status_name, color_hex)
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+            
+    # --- Priority Color Mapping Methods ---
+    def get_priority_color(self, priority_name: str) -> str:
+        """Gets the color for a specific priority."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT ColorCode FROM PriorityConfig WHERE PriorityId = ?',
+                (priority_name,)
+            )
+            result = cursor.fetchone()
+            return result[0] if result else None
+        finally:
+            conn.close()
+            
+    def set_priority_color(self, priority_name: str, color_hex: str):
+        """Sets the color for a specific priority."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT OR REPLACE INTO PriorityConfig (PriorityId, ColorCode) VALUES (?, ?)',
+                (priority_name, color_hex)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+            
+    def get_priority_colors(self) -> list:
+        """Gets all priority color mappings."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT PriorityId, ColorCode FROM PriorityConfig')
+            return cursor.fetchall()
+        finally:
+            conn.close()
+            
+    def save_priority_colors(self, priority_colors: list):
+        """Save all priority color mappings."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            # Clear existing mappings
+            cursor.execute('DELETE FROM PriorityConfig')
+            # Insert new mappings
+            for priority_name, color_hex in priority_colors:
+                if color_hex:  # Only insert if color is specified
+                    cursor.execute(
+                        'INSERT INTO PriorityConfig (PriorityId, ColorCode, CustomLabel) VALUES (?, ?, ?)',
+                        (priority_name, color_hex, priority_name)
+                    )
+            conn.commit()
         finally:
             conn.close()
     
@@ -1336,6 +1497,120 @@ class DatabaseService:
                 DELETE FROM FileAttachments
                 WHERE JiraKey = ? AND AttachmentId = ?
             """, (jira_key, attachment_id))
+            conn.commit()
+        finally:
+            conn.close()
+            
+    # --- Jira Issue Cache Methods ---
+    
+    def save_jira_issue(self, jira_key: str, summary: str = None, status: str = None, priority: str = None):
+        """Saves or updates Jira issue details in the local cache."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Check if the issue already exists
+            cursor.execute("SELECT 1 FROM JiraIssueCache WHERE JiraKey = ?", (jira_key,))
+            exists = cursor.fetchone() is not None
+            
+            # Get current timestamp in UTC
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+            
+            if exists:
+                # Build update query with only provided fields
+                update_parts = []
+                params = []
+                
+                if summary is not None:
+                    update_parts.append("Summary = ?")
+                    params.append(summary)
+                    
+                if status is not None:
+                    update_parts.append("Status = ?")
+                    params.append(status)
+                    
+                if priority is not None:
+                    update_parts.append("Priority = ?")
+                    params.append(priority)
+                
+                # Always update timestamp
+                update_parts.append("UpdatedAt = ?")
+                params.append(current_time)
+                
+                # Add key for WHERE clause
+                params.append(jira_key)
+                
+                # Execute update if there are fields to update
+                if update_parts:
+                    query = f"UPDATE JiraIssueCache SET {', '.join(update_parts)} WHERE JiraKey = ?"
+                    cursor.execute(query, params)
+            else:
+                # Insert new record
+                cursor.execute("""
+                    INSERT INTO JiraIssueCache (JiraKey, Summary, Status, Priority, UpdatedAt)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (jira_key, summary, status, priority, current_time))
+                
+            conn.commit()
+        finally:
+            conn.close()
+            
+    def get_jira_issue(self, jira_key: str) -> dict:
+        """Gets the cached details for a Jira issue."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT JiraKey, Summary, Status, Priority, UpdatedAt
+                FROM JiraIssueCache
+                WHERE JiraKey = ?
+            """, (jira_key,))
+            
+            row = cursor.fetchone()
+            if not row:
+                return None
+                
+            return {
+                'key': row[0],
+                'summary': row[1] or f"{row[0]} (dati offline)",
+                'status': row[2] or 'Unknown',
+                'priority': row[3] or 'Unknown',
+                'updated_at': row[4]
+            }
+        finally:
+            conn.close()
+            
+    def get_all_cached_issues(self) -> list:
+        """Gets all cached Jira issues."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT JiraKey, Summary, Status, Priority, UpdatedAt
+                FROM JiraIssueCache
+                ORDER BY JiraKey
+            """)
+            
+            issues = []
+            for row in cursor.fetchall():
+                issues.append({
+                    'key': row[0],
+                    'summary': row[1] or f"{row[0]} (dati offline)",
+                    'status': row[2] or 'Unknown',
+                    'priority': row[3] or 'Unknown',
+                    'updated_at': row[4]
+                })
+            return issues
+        finally:
+            conn.close()
+            
+    def delete_jira_issue_cache(self, jira_key: str):
+        """Removes a cached Jira issue."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM JiraIssueCache WHERE JiraKey = ?", (jira_key,))
             conn.commit()
         finally:
             conn.close()

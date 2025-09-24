@@ -119,6 +119,36 @@ class JiraService:
             self._logger.error(f"Failed to update priority for {issue_key}: {str(e)}")
             return False
 
+    def get_issues_mentioning_user(self, start_at: int = 0, max_results: int = 100) -> dict:
+        """
+        Gets all issues that mention the current user.
+        Returns a dictionary with 'issues' key containing the list of issues.
+        """
+        if not self.is_connected():
+            raise ConnectionError("Not connected to Jira.")
+            
+        try:
+            def _do_get_mentions():
+                # Get current user information
+                myself = self.jira.myself()
+                username = myself.get('name')
+                display_name = myself.get('displayName', '')
+                
+                # Create a JQL query to find issues mentioning the current user
+                # This covers both @ mentions and general text mentions
+                mentions_jql = f'(text ~ "{username}" OR text ~ "{display_name}" OR mentions = "{username}") ORDER BY updated DESC'
+                
+                # Use the search_issues method to get the results
+                issues = self.search_issues(mentions_jql, start_at, max_results)
+                
+                # Format the response to match expected structure
+                return {"issues": issues, "total": len(issues)}
+                
+            return self._with_retries(_do_get_mentions)
+        except Exception as e:
+            self._logger.error(f"Failed to get issues mentioning the user: {str(e)}")
+            return {"issues": [], "error": str(e)}
+            
     def search_issues(self, jql: str, start_at: int = 0, max_results: int = 100, issue_keys: list[str] | None = None) -> list:
         """
         Searches for issues using a JQL query.
@@ -491,3 +521,59 @@ class JiraService:
         except Exception as e:
             print(f"Error opening issue '{issue_key}' in browser: {e}")
             raise e
+            
+    def get_issue_watchers(self, issue_key):
+        """Get the watchers for an issue."""
+        if not self.is_connected():
+            raise ConnectionError("Not connected to Jira.")
+            
+        def _do_get_watchers():
+            watchers = self.jira.watchers(issue_key)
+            return [{"name": w.displayName, "key": w.key} for w in watchers.watchers]
+            
+        try:
+            return self._with_retries(_do_get_watchers)
+        except Exception as e:
+            self._logger.error(f"Error getting watchers for {issue_key}: {e}")
+            return []
+            
+    def search_issues_with_mentions(self, username=None, max_results=50):
+        """Search for issues that mention the user in comments."""
+        if not self.is_connected():
+            raise ConnectionError("Not connected to Jira.")
+            
+        def _do_search():
+            if not username:
+                # Get current user's info if username not provided
+                current_user = self.jira.myself()
+                username = getattr(current_user, 'name', None) or getattr(current_user, 'key', None)
+                if not username:
+                    return [], "Could not determine current username"
+                    
+            # Create JQL query to search for comments containing the username mention
+            # The ~ operator means contains
+            jql = f'comment ~ "{username}" ORDER BY updated DESC'
+            
+            issues = self.jira.search_issues(jql, maxResults=max_results)
+            
+            result_list = []
+            for issue in issues:
+                # Get only needed fields to keep the response size manageable
+                issue_dict = {
+                    'key': issue.key,
+                    'summary': issue.fields.summary,
+                    'status': getattr(issue.fields.status, 'name', 'Unknown') if hasattr(issue.fields, 'status') else 'Unknown',
+                    'updated': issue.fields.updated,
+                    'assignee': getattr(issue.fields.assignee, 'displayName', 'Unassigned') if hasattr(issue.fields, 'assignee') and issue.fields.assignee else 'Unassigned',
+                    'priority': getattr(issue.fields.priority, 'name', 'N/A') if hasattr(issue.fields, 'priority') and issue.fields.priority else 'N/A'
+                }
+                result_list.append(issue_dict)
+                
+            return result_list, None
+            
+        try:
+            results, error_msg = _do_search()
+            return results, error_msg
+        except Exception as e:
+            self._logger.error(f"Error searching for issues with mentions: {e}")
+            return [], f"Error searching for issues with mentions: {e}"

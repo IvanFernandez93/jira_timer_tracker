@@ -122,6 +122,14 @@ class ConfigDialog(QDialog):
         self.status_color_btn.setIcon(FIF.BRUSH)
         self.status_color_btn.setToolTip("Personalizza i colori degli stati dei ticket Jira")
         layout.addWidget(self.status_color_btn)
+        
+        layout.addWidget(StrongBodyLabel("Colori delle Priorità:"))
+        layout.addWidget(BodyLabel("Configura i colori per le priorità dei ticket Jira."))
+        
+        self.priority_color_btn = PushButton("Configura Colori Priorità")
+        self.priority_color_btn.setIcon(FIF.FLAG)
+        self.priority_color_btn.setToolTip("Personalizza i colori delle priorità dei ticket Jira")
+        layout.addWidget(self.priority_color_btn)
         # Column config button
         try:
             self.column_config_btn = PushButton("Configura colonne griglia")
