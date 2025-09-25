@@ -10,6 +10,7 @@ import markdown
 import webbrowser
 
 from services.jira_service import JiraService
+from services.git_tracking_service import GitTrackingService
 from views.markdown_editor import MarkdownEditor
 import logging
 
@@ -397,6 +398,13 @@ class JiraDetailController(QObject):
         self.db_service = db_service
         self.jira_key = jira_key
         self.priority_controller = None
+        
+        # Initialize Git tracking service
+        try:
+            self.git_tracking = GitTrackingService()
+        except Exception as e:
+            _logger.warning(f"Failed to initialize Git tracking: {e}")
+            self.git_tracking = None
 
         self._issue_data = None
         self._attachments_data = []
@@ -432,6 +440,9 @@ class JiraDetailController(QObject):
         # Open in Jira button
         self.view.open_jira_btn.clicked.connect(self._open_jira_in_browser)
         
+        # Git history button
+        self.view.git_history_btn.clicked.connect(self._show_git_history)
+        
         # Notification button
         self.view.notification_btn.clicked.connect(self._toggle_notification_subscription)
         
@@ -445,9 +456,6 @@ class JiraDetailController(QObject):
         # Attachment signals
         self.view.upload_attachment_btn.clicked.connect(self._upload_attachment)
         self.view.download_selected_btn.clicked.connect(self._download_selected_attachments)
-        
-        # Mentions button
-        self.view.show_mentions_btn.clicked.connect(self._show_mentions_grid)
         self.view.download_all_btn.clicked.connect(self._download_all_attachments)
         
         # Additional attachment button for managing attachments through the dialog
@@ -904,37 +912,6 @@ class JiraDetailController(QObject):
         else:
             QMessageBox.warning(self.view, "Errore", "URL dell'allegato non disponibile")
     
-    def _show_mentions_grid(self):
-        """Opens a grid view showing tickets with mentions of the current user."""
-        try:
-            # Check if Jira is connected
-            if not self.jira_service.is_connected():
-                QMessageBox.warning(self.view, "Connection Error", "Please connect to Jira to show mentions.")
-                return
-            
-            # Get user info to display in the title
-            user_info = self.jira_service.jira.myself()
-            username = user_info.displayName if hasattr(user_info, 'displayName') else (user_info.name if hasattr(user_info, 'name') else 'Current User')
-            
-            # Create view and controller for the mentions grid
-            from views.mentions_grid_view import MentionsGridView
-            from controllers.mentions_grid_controller import MentionsGridController
-            
-            # Create view
-            view = MentionsGridView(parent=self.view)
-            view.setWindowTitle(f"Tickets Mentioning {username}")
-            
-            # Create controller and populate with data
-            controller = MentionsGridController(view, self.jira_service)
-            controller.load_mentions()
-            
-            # Show the view as a modal dialog
-            view.exec()
-            
-        except Exception as e:
-            QMessageBox.critical(self.view, "Error", f"Failed to load mentions: {e}")
-            _logger.error(f"Error in _show_mentions_grid: {e}")
-
     def _open_jira_in_browser(self):
         """Opens the current Jira ticket in the default browser."""
         try:
@@ -946,6 +923,46 @@ class JiraDetailController(QObject):
         except Exception as e:
             QMessageBox.warning(self.view, "Errore", f"Impossibile aprire il ticket nel browser: {str(e)}")
             _logger.error(f"Errore nell'apertura del ticket nel browser: {e}")
+    
+    def _show_git_history(self):
+        """Show the Git history dialog for the current issue."""
+        if not self.git_tracking:
+            QMessageBox.information(
+                self.view, 
+                "Git Tracking Non Disponibile",
+                "Il servizio di tracking Git non è disponibile.\n\n"
+                "Possibili cause:\n"
+                "- Git non è installato sul sistema\n"
+                "- Errore durante l'inizializzazione del repository\n"
+                "- Permessi insufficienti per creare file di tracking"
+            )
+            return
+        
+        try:
+            from views.git_history_dialog import GitIssueHistoryDialog
+            
+            # Get issue summary for the dialog title
+            issue_summary = ""
+            if self._issue_data:
+                issue_summary = self._issue_data.get('fields', {}).get('summary', '')
+            
+            # Create and show the Git history dialog
+            dialog = GitIssueHistoryDialog(
+                parent=self.view,
+                git_tracking_service=self.git_tracking,
+                jira_key=self.jira_key,
+                issue_summary=issue_summary
+            )
+            
+            dialog.exec()
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self.view,
+                "Errore Cronologia Git", 
+                f"Impossibile aprire la cronologia Git: {str(e)}"
+            )
+            _logger.error(f"Errore nell'apertura della cronologia Git: {e}")
     
     def _handle_attachment_click(self, event, attachment_widget):
         """Handle clicks on attachment thumbnail or filename."""
@@ -974,9 +991,7 @@ class JiraDetailController(QObject):
         
         drafts_to_recover = []
         
-        if not annotations:
-            self._add_new_note_tab(title="Note 1")
-        else:
+        if annotations:
             for title, content in annotations:
                 # Check if there's a draft version newer than the saved content
                 draft_content = self.db_service.get_draft(self.jira_key, title)
@@ -1039,16 +1054,22 @@ class JiraDetailController(QObject):
         _save_current_note after a short delay.
         """
         try:
-            # 2 second debounce for draft save
+            # Get autosave intervals from settings
+            from services.app_settings import AppSettings
+            settings = AppSettings()
+            draft_interval = settings.get_autosave_draft_interval() * 1000  # Convert to milliseconds
+            full_interval = settings.get_autosave_full_interval() * 1000    # Convert to milliseconds
+            
+            # Timer for draft save (more frequent)
             self.autosave_timer = QTimer(self)
             self.autosave_timer.setSingleShot(True)
-            self.autosave_timer.setInterval(2000)
+            self.autosave_timer.setInterval(draft_interval)
             self.autosave_timer.timeout.connect(self._save_current_note_draft)
             
-            # 10 second debounce for actual save to database
+            # Timer for full save to database (less frequent)
             self.full_save_timer = QTimer(self)
             self.full_save_timer.setSingleShot(True)
-            self.full_save_timer.setInterval(10000)  # 10 seconds
+            self.full_save_timer.setInterval(full_interval)
             self.full_save_timer.timeout.connect(self._save_current_note)
         except Exception as e:
             # Ensure controller still initializes even if timers are unavailable
@@ -1057,6 +1078,30 @@ class JiraDetailController(QObject):
                 delattr(self, 'autosave_timer')
             if hasattr(self, 'full_save_timer'):
                 delattr(self, 'full_save_timer')
+
+    def reload_autosave_settings(self):
+        """Reload autosave settings and update timer intervals.
+        
+        This method can be called when the user changes autosave settings
+        in the configuration dialog.
+        """
+        try:
+            from services.app_settings import AppSettings
+            settings = AppSettings()
+            
+            draft_interval = settings.get_autosave_draft_interval() * 1000  # Convert to milliseconds
+            full_interval = settings.get_autosave_full_interval() * 1000    # Convert to milliseconds
+            
+            # Update existing timers if they exist
+            if hasattr(self, 'autosave_timer') and self.autosave_timer:
+                self.autosave_timer.setInterval(draft_interval)
+            
+            if hasattr(self, 'full_save_timer') and self.full_save_timer:
+                self.full_save_timer.setInterval(full_interval)
+                
+            _logger.debug(f"Reloaded autosave settings: draft={draft_interval}ms, full={full_interval}ms")
+        except Exception as e:
+            _logger.error(f"Failed to reload autosave settings: {e}")
 
     def _save_current_note_draft(self):
         """Save the currently active note as a draft.
@@ -1129,18 +1174,29 @@ class JiraDetailController(QObject):
     
     def _show_save_indicator(self):
         """Shows a temporary visual indicator that the note was saved."""
-        # Implementa un indicatore visibile ma non invasivo che la nota è stata salvata
         try:
             # Ottieni l'indice della scheda corrente
             current_index = self.view.notes_tab_widget.currentIndex()
             if current_index >= 0:
-                # Ottieni il testo della scheda
-                tab_text = self.view.notes_tab_widget.tabText(current_index)
-                # Mostra un indicatore temporaneo nel testo della scheda
-                self.view.notes_tab_widget.setTabText(current_index, f"{tab_text} ✓")
+                # Ottieni il titolo originale della scheda (senza indicatori)
+                original_title = self._current_note_title or self.view.notes_tab_widget.tabText(current_index).replace(' ✓', '').replace(' 💾', '').strip()
                 
-                # Ripristina il testo originale dopo 2 secondi
-                QTimer.singleShot(2000, lambda: self.view.notes_tab_widget.setTabText(current_index, tab_text))
+                # Mostra un indicatore temporaneo di salvataggio
+                self.view.notes_tab_widget.setTabText(current_index, f"{original_title} ✓")
+                
+                # Rimuovi l'indicatore dopo il tempo configurato
+                from services.app_settings import AppSettings
+                settings = AppSettings()
+                indicator_duration = settings.get_save_indicator_duration() * 1000  # Convert to milliseconds
+                QTimer.singleShot(indicator_duration, lambda: self._remove_save_indicator(current_index, original_title))
+        except Exception as e:
+            _logger.debug(f"Error showing save indicator: {e}")
+    
+    def _remove_save_indicator(self, tab_index, original_title):
+        """Remove the save indicator from the tab."""
+        try:
+            if tab_index < self.view.notes_tab_widget.count():
+                self.view.notes_tab_widget.setTabText(tab_index, original_title)
         except Exception:
             pass
 
@@ -1204,6 +1260,9 @@ class JiraDetailController(QObject):
             self._active_note_editor.textChanged.connect(self.autosave_timer.start)
             # Connect to full save timer (runs after 10 seconds of inactivity)
             self._active_note_editor.textChanged.connect(self.full_save_timer.start)
+            
+        # Start async loading of issue links to update the note
+        self._start_async_links_loading()
 
     def _remove_note_tab(self, index):
         """Removes a note tab and deletes it from the database."""
@@ -2140,9 +2199,6 @@ class JiraDetailController(QObject):
             if self.view.issue_links_tree.topLevelItemCount() > 0:
                 self.view.issue_links_tree.topLevelItem(0).setExpanded(True)
             
-            # Update the auto-generated note with links information
-            self._update_auto_note_with_links(links_tree)
-            
         except Exception as e:
             print(f"Error building links tree: {e}")
             self._on_links_error("Errore nella costruzione dell'albero dei collegamenti")
@@ -2229,8 +2285,8 @@ class JiraDetailController(QObject):
             # Set the current priority in the combo box
             self._update_priority_combo_from_issue_data()
             
-            # Create or update auto-generated note with issue details
-            self._create_or_update_auto_note()
+            # Track issue changes for automatic logging
+            self._track_issue_changes()
             
         except Exception as e:
             print(f"Error populating issue data: {e}")
@@ -2336,203 +2392,22 @@ class JiraDetailController(QObject):
         seconds = total_seconds % 60
         return f"{hours:02}:{minutes:02}:{seconds:02}"
 
-    def _create_or_update_auto_note(self):
-        """Create or update the auto-generated note with issue details. Now with version tracking."""
-        if not self._issue_data:
+    def _track_issue_changes(self):
+        """Track changes to the current issue using Git version control."""
+        if not self._issue_data or not self.git_tracking:
             return
             
-        import hashlib
-        import json
-        from datetime import datetime
+        try:
+            # Use Git tracking service to handle all change detection and versioning
+            changes_committed = self.git_tracking.track_issue_changes(self.jira_key, self._issue_data)
             
-        fields = self._issue_data.get('fields', {})
-        
-        # Build the note content
-        content_lines = []
-        content_lines.append(f"# {fields.get('summary', 'No Summary')}")
-        content_lines.append("")
-        content_lines.append("## Issue Information")
-        content_lines.append(f"- **Key**: {self.jira_key}")
-        content_lines.append(f"- **Type**: {fields.get('issuetype', {}).get('name', 'N/A')}")
-        content_lines.append(f"- **Status**: {fields.get('status', {}).get('name', 'N/A')}")
-        content_lines.append(f"- **Priority**: {fields.get('priority', {}).get('name', 'N/A')}")
-        content_lines.append(f"- **Assignee**: {fields.get('assignee', {}).get('displayName', 'Unassigned')}")
-        
-        # Add reporter if available
-        reporter = fields.get('reporter', {}).get('displayName')
-        if reporter:
-            content_lines.append(f"- **Reporter**: {reporter}")
-        
-        # Add created/updated dates if available (converted to local time)
-        created = fields.get('created')
-        if created:
-            try:
-                # Parse the UTC datetime and convert to local time
-                dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
-                local_dt = dt.astimezone()  # Senza argomenti, astimezone converte al fuso orario locale
-                
-                # Format for display with local timezone
-                content_lines.append(f"- **Created**: {local_dt.strftime('%d %b %Y at %H:%M')}")
-            except:
-                pass
-                
-        updated = fields.get('updated')
-        if updated:
-            try:
-                # Parse the UTC datetime and convert to local time
-                dt = datetime.fromisoformat(updated.replace('Z', '+00:00'))
-                local_dt = dt.astimezone()  # Senza argomenti, astimezone converte al fuso orario locale
-                
-                # Format for display with local timezone
-                content_lines.append(f"- **Updated**: {local_dt.strftime('%d %b %Y at %H:%M')}")
-            except:
-                pass
-        
-        content_lines.append("")
-        content_lines.append("## Description")
-        description = fields.get('description', 'No description.')
-        if description:
-            # Convert Jira markup to basic markdown
-            description_md = description.replace('{code}', '```').replace('{code}', '```')
-            content_lines.append(description_md)
-        else:
-            content_lines.append("No description available.")
-        
-        content_lines.append("")
-        content_lines.append("## Links")
-        content_lines.append("*Loading issue links...*")
-        
-        # Create the content without hash for comparison
-        content = "\n".join(content_lines)
-        auto_note_title = "Auto: Issue Details"
-        
-        # Check if auto note already exists
-        existing_notes = self.db_service.get_notes_by_jira_key(self.jira_key)
-        
-        # Separate the main note and versioned notes
-        main_note = None
-        versioned_notes = []
-        
-        for note in existing_notes:
-            if note['title'] == auto_note_title:
-                main_note = note
-            elif note['title'].startswith("Auto: Issue Details v"):
-                versioned_notes.append(note)
-        
-        # Sort versioned notes by version number (highest first)
-        def get_version(note):
-            try:
-                return int(note['title'].split("v")[1])
-            except:
-                return 0
-                
-        versioned_notes.sort(key=get_version, reverse=True)
-        
-        # Function to normalize content for comparison - make it less sensitive to whitespace
-        # and other formatting differences
-        def normalize_content(content_text):
-            if not content_text:
-                return ""
-                
-            # Remove any hidden hash comments
-            if "<!-- Issue data hash: " in content_text:
-                content_text = content_text.split("<!-- Issue data hash: ")[0]
-                
-            # Extract only the significant content
-            # This focuses on extracting only key information for comparison:
-            # - Summary
-            # - Issue Key
-            # - Type
-            # - Status
-            # - Priority
-            # - Assignee
-            # - Description (without caring about whitespace)
-            result = {}
-            
-            # Extract Summary (first heading)
-            import re
-            summary_match = re.search(r'#\s*(.*?)(?=\n|$)', content_text)
-            if summary_match:
-                result['summary'] = summary_match.group(1).strip()
-            
-            # Extract Key, Type, Status, Priority, Assignee
-            for field in ['Key', 'Type', 'Status', 'Priority', 'Assignee']:
-                pattern = r'\*\*' + field + r'\*\*:\s*(.*?)(?=\n|$)'
-                match = re.search(pattern, content_text)
-                if match:
-                    result[field.lower()] = match.group(1).strip()
-            
-            # Extract Description (normalize whitespace)
-            desc_pattern = r'## Description\s*(.*?)(?=\n##|\Z)'
-            desc_match = re.search(desc_pattern, content_text, re.DOTALL)
-            if desc_match:
-                # Normalize whitespace in description
-                desc = desc_match.group(1).strip()
-                # Remove all whitespace to make comparison less sensitive
-                desc = re.sub(r'\s+', '', desc)
-                result['description'] = desc
-                
-            return result
-            
-        # First check if the main note exists
-        if main_note:
-            # Compare content using normalized values
-            main_content_norm = normalize_content(main_note['content'])
-            new_content_norm = normalize_content(content)
-            
-            # Check if the significant parts are the same
-            significant_changes = False
-            
-            # Compare all extracted fields
-            for key in set(main_content_norm.keys()) | set(new_content_norm.keys()):
-                main_value = main_content_norm.get(key, '')
-                new_value = new_content_norm.get(key, '')
-                
-                # If values are different for any key field, consider it a significant change
-                if main_value != new_value:
-                    significant_changes = True
-                    break
-            
-            if not significant_changes:
-                # No significant changes detected, update timestamp but don't create new version
-                self.db_service.update_note(main_note['id'], content=content)
-                return
+            if changes_committed:
+                _logger.info(f"Git: Tracked changes for {self.jira_key}")
             else:
-                # Significant changes detected, create a new version
-                version = 1
-                if versioned_notes:
-                    version = get_version(versioned_notes[0]) + 1
+                _logger.debug(f"Git: No changes detected for {self.jira_key}")
                 
-                # Create a new versioned note
-                new_title = f"Auto: Issue Details v{version}"
-                self.db_service.create_note(
-                    jira_key=self.jira_key,
-                    title=new_title,
-                    content=content,
-                    tags="auto-generated,issue-details,version-history"
-                )
-                
-                # Also update the main note with the latest content
-                self.db_service.update_note(main_note['id'], content=content)
-                return
-        elif versioned_notes:
-            # No main note, but we have versioned notes
-            # Create a new main note with the current content
-            self.db_service.create_note(
-                jira_key=self.jira_key,
-                title=auto_note_title,
-                content=content,
-                tags="auto-generated,issue-details"
-            )
-            return
-        else:
-            # No notes exist at all, create the first one
-            self.db_service.create_note(
-                jira_key=self.jira_key,
-                title=auto_note_title,
-                content=content,
-                tags="auto-generated,issue-details"
-            )
+        except Exception as e:
+            _logger.error(f"Failed to track changes for {self.jira_key}: {e}")
     
     def populate_priority_combo(self, priorities=None):
         """Populate the priority dropdown with available priorities."""
@@ -2660,66 +2535,5 @@ class JiraDetailController(QObject):
         # Refresh the priority combo box after configuration
         priorities = self.priority_controller.get_available_priorities()
         self.populate_priority_combo(priorities)
-    
-    def _update_auto_note_with_links(self, links_tree):
-        """Update the auto-generated note with links information."""
-        auto_note_title = "Auto: Issue Details"
-        existing_notes = self.db_service.get_notes_by_jira_key(self.jira_key)
-        
-        # Find the auto note
-        auto_note = None
-        for note in existing_notes:
-            if note['title'] == auto_note_title:
-                auto_note = note
-                break
-        
-        if not auto_note:
-            return
-            
-        # Build links section
-        links_lines = []
-        if links_tree:
-            for root_data in links_tree:
-                children = root_data.get('children', [])
-                if children:
-                    links_lines.append("")
-                    links_lines.append("### Issue Links")
-                    for child in children:
-                        link_type = child.get('link_type', 'links to')
-                        direction = child.get('direction', 'outward')
-                        key = child.get('key', 'Unknown')
-                        summary = child.get('summary', 'No summary')
-                        status = child.get('status', 'Unknown')
-                        
-                        # Format based on direction
-                        if direction == 'outward':
-                            links_lines.append(f"- **{link_type}** [{key}]({summary}) - {status}")
-                        elif direction == 'inward':
-                            links_lines.append(f"- **{link_type}** [{key}]({summary}) - {status}")
-                        else:
-                            links_lines.append(f"- [{key}]({summary}) - {status}")
-                else:
-                    links_lines.append("")
-                    links_lines.append("*No linked issues found.*")
-        else:
-            links_lines.append("")
-            links_lines.append("*No linked issues found.*")
-        
-        links_content = "\n".join(links_lines)
-        
-        # Update the note content by replacing the links section
-        current_content = auto_note['content']
-        # Find and replace the "## Links" section
-        import re
-        links_pattern = r"(## Links\n).*?(\n\n##|\n*$)"
-        replacement = r"\1" + links_content + r"\2"
-        
-        # If no next section, just append
-        if "## Links" in current_content:
-            new_content = re.sub(links_pattern, replacement, current_content, flags=re.DOTALL)
-        else:
-            new_content = current_content + links_content
-        
-        self.db_service.update_note(auto_note['id'], content=new_content)
 
 

@@ -2,7 +2,7 @@ from PyQt6.QtCore import Qt
 import logging
 
 logger = logging.getLogger('JiraTimeTracker')
-from PyQt6.QtWidgets import QTabWidget, QWidget, QVBoxLayout, QDialog, QDialogButtonBox, QCheckBox, QHBoxLayout, QColorDialog, QPushButton
+from PyQt6.QtWidgets import QTabWidget, QWidget, QVBoxLayout, QDialog, QDialogButtonBox, QCheckBox, QHBoxLayout, QColorDialog, QPushButton, QSpinBox
 from qfluentwidgets import (
     LineEdit, PushButton, BodyLabel, StrongBodyLabel, 
     FluentIcon as FIF, InfoBar, InfoBarPosition, TextEdit,
@@ -30,6 +30,7 @@ class ConfigDialog(QDialog):
         self.jql_tab = QWidget()
         self.appearance_tab = QWidget()
         self.sync_tab = QWidget()
+        self.editor_tab = QWidget()
         self.logging_tab = QWidget()
         self.data_paths_tab = QWidget()
         
@@ -38,6 +39,7 @@ class ConfigDialog(QDialog):
         self.tab_widget.addTab(self.jql_tab, "JQL Predefinita")
         self.tab_widget.addTab(self.appearance_tab, "Aspetto")
         self.tab_widget.addTab(self.sync_tab, "Sincronizzazione")
+        self.tab_widget.addTab(self.editor_tab, "Editor Note")
         self.tab_widget.addTab(self.logging_tab, "Logging")
         self.tab_widget.addTab(self.data_paths_tab, "Percorsi Dati")
         
@@ -49,6 +51,7 @@ class ConfigDialog(QDialog):
         self._setup_jql_tab()
         self._setup_appearance_tab()
         self._setup_sync_tab()
+        self._setup_editor_tab()
         self._setup_logging_tab()
         self._setup_data_paths_tab()
         
@@ -325,6 +328,14 @@ class ConfigDialog(QDialog):
         self.db_path_label.setWordWrap(True)
         layout.addWidget(self.db_path_label)
         
+        # Git tracking path
+        layout.addWidget(StrongBodyLabel("Repository Git Tracking:"))
+        git_tracking_path = os.path.join(db_path, ".jira_tracking")
+        self.git_tracking_path_label = BodyLabel(git_tracking_path)
+        self.git_tracking_path_label.setStyleSheet("background-color: #f0f0f0; padding: 5px; border-radius: 3px;")
+        self.git_tracking_path_label.setWordWrap(True)
+        layout.addWidget(self.git_tracking_path_label)
+        
         # Logs path
         layout.addWidget(StrongBodyLabel("Cartella dei Log:"))
         logs_path = os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming', 'JiraTimeTracker', 'logs')
@@ -348,6 +359,11 @@ class ConfigDialog(QDialog):
         self.open_db_folder_btn.setIcon(FIF.FOLDER)
         self.open_db_folder_btn.clicked.connect(lambda: self._open_folder(db_path))
         buttons_layout.addWidget(self.open_db_folder_btn)
+        
+        self.open_git_folder_btn = PushButton("Apri Cartella Git")
+        self.open_git_folder_btn.setIcon(FIF.FOLDER)
+        self.open_git_folder_btn.clicked.connect(lambda: self._open_folder(git_tracking_path))
+        buttons_layout.addWidget(self.open_git_folder_btn)
         
         self.open_logs_folder_btn = PushButton("Apri Cartella Log")
         self.open_logs_folder_btn.setIcon(FIF.FOLDER)
@@ -573,6 +589,18 @@ class ConfigDialog(QDialog):
             app_settings.set_setting("notification_unread_color", self._unread_color)
             app_settings.set_setting("notification_read_color", self._read_color)
 
+    def save_editor_settings(self, app_settings):
+        """Save editor autosave settings."""
+        if app_settings and hasattr(self, 'draft_autosave_spinbox'):
+            # Save intervals in milliseconds
+            draft_interval_ms = self.draft_autosave_spinbox.value() * 1000
+            full_interval_ms = self.full_autosave_spinbox.value() * 1000
+            indicator_duration_ms = self.save_indicator_spinbox.value() * 1000
+            
+            app_settings.set_autosave_draft_interval(draft_interval_ms)
+            app_settings.set_autosave_full_interval(full_interval_ms)
+            app_settings.set_save_indicator_duration(indicator_duration_ms)
+
     def _open_folder(self, path: str):
         """Open a folder in the system file explorer in a cross-platform way.
 
@@ -678,3 +706,52 @@ class ConfigDialog(QDialog):
                 self.open_logs_folder_btn.setEnabled(True)
             except Exception:
                 pass
+
+    def _setup_editor_tab(self):
+        """Setup the editor settings tab."""
+        layout = QVBoxLayout(self.editor_tab)
+        
+        # Autosave Settings
+        layout.addWidget(StrongBodyLabel("Impostazioni Salvataggio Automatico"))
+        layout.addWidget(BodyLabel("Configura la frequenza del salvataggio automatico delle note."))
+        
+        # Draft autosave interval
+        draft_layout = QHBoxLayout()
+        draft_layout.addWidget(BodyLabel("Salvataggio bozze (secondi):"))
+        self.draft_autosave_spinbox = QSpinBox()
+        self.draft_autosave_spinbox.setRange(1, 300)  # 1 second to 5 minutes
+        self.draft_autosave_spinbox.setValue(self.app_settings.get_autosave_draft_interval() // 1000)
+        self.draft_autosave_spinbox.setToolTip("Frequenza di salvataggio delle bozze (backup temporaneo)")
+        draft_layout.addWidget(self.draft_autosave_spinbox)
+        draft_layout.addWidget(BodyLabel("sec"))
+        draft_layout.addStretch()
+        layout.addLayout(draft_layout)
+        
+        # Full save interval
+        full_layout = QHBoxLayout()
+        full_layout.addWidget(BodyLabel("Salvataggio definitivo (secondi):"))
+        self.full_autosave_spinbox = QSpinBox()
+        self.full_autosave_spinbox.setRange(5, 600)  # 5 seconds to 10 minutes
+        self.full_autosave_spinbox.setValue(self.app_settings.get_autosave_full_interval() // 1000)
+        self.full_autosave_spinbox.setToolTip("Frequenza di salvataggio definitivo nel database")
+        full_layout.addWidget(self.full_autosave_spinbox)
+        full_layout.addWidget(BodyLabel("sec"))
+        full_layout.addStretch()
+        layout.addLayout(full_layout)
+        
+        # Save indicator duration
+        indicator_layout = QHBoxLayout()
+        indicator_layout.addWidget(BodyLabel("Durata indicatore salvataggio (secondi):"))
+        self.save_indicator_spinbox = QSpinBox()
+        self.save_indicator_spinbox.setRange(1, 10)  # 1 to 10 seconds
+        self.save_indicator_spinbox.setValue(self.app_settings.get_save_indicator_duration() // 1000)
+        self.save_indicator_spinbox.setToolTip("Durata della visualizzazione del checkmark ✓ nel tab")
+        indicator_layout.addWidget(self.save_indicator_spinbox)
+        indicator_layout.addWidget(BodyLabel("sec"))
+        indicator_layout.addStretch()
+        layout.addLayout(indicator_layout)
+        
+        layout.addWidget(BodyLabel(""))
+        layout.addWidget(BodyLabel("Nota: Le modifiche ai timer verranno applicate alla prossima apertura di una nota."))
+        
+        layout.addStretch()

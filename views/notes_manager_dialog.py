@@ -37,10 +37,11 @@ class NotesManagerDialog(QDialog):
     open_jira_detail_requested = pyqtSignal(str)  # Emette la chiave Jira
     start_timer_requested = pyqtSignal(str)  # Emette la chiave Jira per avviare il timer
 
-    def __init__(self, db_service, app_settings, parent=None):
+    def __init__(self, db_service, app_settings, jira_service=None, parent=None):
         super().__init__(parent)
         self.db_service = db_service
         self.app_settings = app_settings
+        self.jira_service = jira_service
         self.current_note_id = None
         self.show_deleted = False
 
@@ -166,6 +167,10 @@ class NotesManagerDialog(QDialog):
         self.tags_edit.setToolTip("Tag separati da virgola")
         self.form_layout.addRow("Tag:", self.tags_edit)
 
+        self.fictitious_cb = QCheckBox("Ticket fittizio")
+        self.fictitious_cb.setToolTip("Segna questo ticket come fittizio (non verrà verificato su Jira)")
+        self.form_layout.addRow("", self.fictitious_cb)
+
         self.editor_header_layout.addLayout(self.form_layout)
 
         # Content editor
@@ -221,7 +226,7 @@ class NotesManagerDialog(QDialog):
         # Connect signals
         self.button_box.rejected.connect(self.accept)
         self.new_btn.clicked.connect(self.create_new_note)
-        self.refresh_btn.clicked.connect(self.load_notes)
+        self.refresh_btn.clicked.connect(self.refresh_notes)
         self.all_notes_btn.clicked.connect(self.show_all_notes_grid)
         self.search_box.textChanged.connect(self.apply_filters)
         self.tag_filter_combo.currentIndexChanged.connect(self.apply_filters)
@@ -317,6 +322,24 @@ class NotesManagerDialog(QDialog):
         except Exception as e:
             QMessageBox.warning(self, "Errore", f"Errore nel caricamento delle note: {str(e)}")
 
+    def refresh_notes(self):
+        """Refresh notes list and tags while maintaining current filters."""
+        # Store current filter selections
+        current_tag_filter = self.tag_filter_combo.currentData()
+        
+        # Reload data
+        self.load_tags()  # Refresh tags in case new ones were added
+        self.load_notes()
+        
+        # Restore tag filter selection if it still exists
+        if current_tag_filter:
+            for i in range(self.tag_filter_combo.count()):
+                if self.tag_filter_combo.itemData(i) == current_tag_filter:
+                    self.tag_filter_combo.setCurrentIndex(i)
+                    break
+        
+        self.apply_filters()  # Apply current filters after reloading
+
     def apply_filters(self):
         """Apply search and tag filters to the notes table."""
         search_term = self.search_box.text().lower()
@@ -340,6 +363,7 @@ class NotesManagerDialog(QDialog):
         """Handle show deleted notes toggle."""
         self.show_deleted = checked
         self.load_notes()
+        self.apply_filters()  # Apply filters after reloading
 
     def create_new_note(self):
         """Create a new note."""
@@ -356,6 +380,7 @@ class NotesManagerDialog(QDialog):
         self.jira_key_edit.clear()
         self.title_edit.clear()
         self.tags_edit.clear()
+        self.fictitious_cb.setChecked(False)
         self.content_edit.setMarkdown("")
         self.info_label.clear()
 
@@ -387,6 +412,7 @@ class NotesManagerDialog(QDialog):
             self.start_timer_btn.setEnabled(has_jira)  # Abilita il pulsante del timer se c'è una chiave Jira
             self.title_edit.setText(note['title'])
             self.tags_edit.setText(note['tags'])
+            self.fictitious_cb.setChecked(note.get('is_fictitious', False))
             self.content_edit.setMarkdown(note['content'])
 
             # Update info label
@@ -431,6 +457,7 @@ class NotesManagerDialog(QDialog):
             jira_key = self.jira_key_edit.text().strip() or None
             content = self.content_edit.toMarkdown()
             tags = self.tags_edit.text().strip()
+            is_fictitious = self.fictitious_cb.isChecked()
 
             if self.current_note_id:
                 # Update existing note
@@ -439,7 +466,8 @@ class NotesManagerDialog(QDialog):
                     jira_key=jira_key,
                     title=title,
                     content=content,
-                    tags=tags
+                    tags=tags,
+                    is_fictitious=is_fictitious
                 )
             else:
                 # Create new note
@@ -447,8 +475,17 @@ class NotesManagerDialog(QDialog):
                     jira_key=jira_key,
                     title=title,
                     content=content,
-                    tags=tags
+                    tags=tags,
+                    is_fictitious=is_fictitious
                 )
+
+            # If jira_service is available and this is a jira key that's marked as fictitious,
+            # add it to the fictitious tickets cache
+            if self.jira_service and jira_key and is_fictitious:
+                self.jira_service.mark_ticket_as_fictitious(jira_key)
+            elif self.jira_service and jira_key and not is_fictitious:
+                # If it's now marked as NOT fictitious, remove it from the cache
+                self.jira_service.mark_ticket_as_real(jira_key)
 
             self.save_btn.setEnabled(False)
             
@@ -483,6 +520,7 @@ class NotesManagerDialog(QDialog):
             try:
                 self.db_service.delete_note_soft(self.current_note_id)
                 self.load_notes()
+                self.apply_filters()  # Apply filters after reloading
                 self.clear_editor()
                 self.current_note_id = None
                 self.save_btn.setEnabled(False)
@@ -500,6 +538,7 @@ class NotesManagerDialog(QDialog):
         try:
             self.db_service.restore_note(self.current_note_id)
             self.load_notes()
+            self.apply_filters()  # Apply filters after reloading
             self.load_note_in_editor(self.current_note_id)  # Reload to update UI
         except Exception as e:
             QMessageBox.warning(self, "Errore", f"Errore nel ripristino della nota: {str(e)}")

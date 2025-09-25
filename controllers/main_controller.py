@@ -975,7 +975,7 @@ class MainController(QObject):
         """Shows the notes manager dialog."""
         try:
             from views.notes_manager_dialog import NotesManagerDialog
-            notes_dialog = NotesManagerDialog(self.db_service, self.app_settings, parent=None)  # No parent for top-level
+            notes_dialog = NotesManagerDialog(self.db_service, self.app_settings, self.jira_service, parent=None)  # No parent for top-level
             
             # Connect the signals
             notes_dialog.all_notes_requested.connect(self._show_notes_grid_dialog)

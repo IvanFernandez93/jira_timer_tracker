@@ -792,6 +792,17 @@ class StrongBodyLabel(QLabel):
     pass
 
 
+class CaptionLabel(QLabel):
+    pass
+
+
+class CardWidget(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameStyle(QFrame.Shape.Panel)
+        self.setStyleSheet("border: 1px solid #ddd; border-radius: 4px; padding: 8px;")
+
+
 class PrimaryPushButton(PushButton):
     pass
 
@@ -812,7 +823,7 @@ __all__ = [
     'getIconColor', 'Theme', 'setTheme', 'isDarkTheme', 'Dialog', 'ToolButton', 'MessageBox',
     'TableWidget', 'LineEdit', 'SearchLineEdit', 'BodyLabel', 'TextEdit', 'SwitchButton',
     'ExpandLayout', 'ComboBox', 'TransparentToolButton', 'SubtitleLabel', 'IconWidget', 'setFont',
-    'InfoBar', 'InfoBarPosition', 'FIF'
+    'InfoBar', 'InfoBarPosition', 'FIF', 'StrongBodyLabel', 'CaptionLabel', 'CardWidget'
 ]
 
 # Backwards compat name used in imports

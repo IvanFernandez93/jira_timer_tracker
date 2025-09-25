@@ -17,7 +17,7 @@ class MarkdownEditor(QWidget):
     
     def __init__(self, parent=None, show_toolbar: bool = True):
         super().__init__(parent)
-        self.preview_mode = 0  # 0: edit only, 1: edit + preview side by side
+        self.view_mode = 0  # 0: edit only, 1: preview only, 2: side-by-side
         self.show_toolbar = show_toolbar
         self.setup_ui()
         self.setup_connections()
@@ -42,26 +42,40 @@ class MarkdownEditor(QWidget):
         # Create stacked widget for different modes
         self.stacked_widget = QStackedWidget()
         
+        # Create editor widget for edit-only mode
+        self.editor = QTextEdit()
+        self.editor.setAcceptRichText(False)  # We want plain text with Markdown
+        
+        # Create preview browser for preview-only mode
+        self.preview_browser = QTextBrowser()
+        self.preview_browser.setOpenExternalLinks(True)
+        self.preview_browser.setReadOnly(True)
+        
         # Create combined view (editor + preview side by side)
         self.combined_widget = QWidget()
         combined_layout = QHBoxLayout(self.combined_widget)
         combined_layout.setContentsMargins(0, 0, 0, 0)
         combined_layout.setSpacing(5)
         
-        # Editor on the left
-        self.editor = QTextEdit()
-        self.editor.setAcceptRichText(False)  # We want plain text with Markdown
-        combined_layout.addWidget(self.editor)
+        # Editor on the left (create separate instance for combined view)
+        self.editor_combined = QTextEdit()
+        self.editor_combined.setAcceptRichText(False)
+        combined_layout.addWidget(self.editor_combined)
         
-        # Preview on the right
-        self.preview = QTextBrowser()
-        self.preview.setOpenExternalLinks(True)
-        self.preview.setReadOnly(True)  # Preview is read-only
-        combined_layout.addWidget(self.preview)
+        # Preview on the right (create separate instance for combined view)
+        self.preview_combined = QTextBrowser()
+        self.preview_combined.setOpenExternalLinks(True)
+        self.preview_combined.setReadOnly(True)
+        combined_layout.addWidget(self.preview_combined)
+        
+        # Sync content between editor instances
+        self.editor.textChanged.connect(self._sync_editors)
+        self.editor_combined.textChanged.connect(self._sync_editors_reverse)
         
         # Add widgets to stacked widget
         self.stacked_widget.addWidget(self.editor)  # Index 0: Edit only
-        self.stacked_widget.addWidget(self.combined_widget)  # Index 1: Edit + Preview side by side
+        self.stacked_widget.addWidget(self.combined_widget)  # Index 1: Side-by-side
+        self.stacked_widget.addWidget(self.preview_browser)  # Index 2: Preview only
         
         main_layout.addWidget(self.stacked_widget)
         
@@ -179,10 +193,16 @@ class MarkdownEditor(QWidget):
         # Forward text changed signal
         self.editor.textChanged.connect(self.textChanged.emit)
         self.editor.textChanged.connect(self._update_preview)
+        
+        # Connect the combined editor signal as well
+        if hasattr(self, 'editor_combined'):
+            self.editor_combined.textChanged.connect(self.textChanged.emit)
+            self.editor_combined.textChanged.connect(self._update_preview)
     
     def get_selected_text_or_word(self):
         """Get selected text or word at cursor position."""
-        cursor = self.editor.textCursor()
+        editor = self.get_active_editor()
+        cursor = editor.textCursor()
         
         if cursor.hasSelection():
             return cursor.selectedText(), cursor
@@ -205,7 +225,8 @@ class MarkdownEditor(QWidget):
             new_text = f"{prefix}{text}{suffix}"
         
         cursor.insertText(new_text)
-        self.editor.setTextCursor(cursor)
+        editor = self.get_active_editor()
+        editor.setTextCursor(cursor)
     
     def toggle_bold(self):
         """Toggle bold formatting (**text**)."""
@@ -225,7 +246,8 @@ class MarkdownEditor(QWidget):
     
     def insert_header(self, level):
         """Insert header at the current line."""
-        cursor = self.editor.textCursor()
+        editor = self.get_active_editor()
+        cursor = editor.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
         cursor.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
         
@@ -240,11 +262,12 @@ class MarkdownEditor(QWidget):
         new_text = header_prefix + line_text
         
         cursor.insertText(new_text)
-        self.editor.setTextCursor(cursor)
+        editor.setTextCursor(cursor)
     
     def insert_bullet_list(self):
         """Insert bullet list item."""
-        cursor = self.editor.textCursor()
+        editor = self.get_active_editor()
+        cursor = editor.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
         
         if cursor.atEnd():
@@ -252,11 +275,12 @@ class MarkdownEditor(QWidget):
         else:
             cursor.insertText("- ")
             
-        self.editor.setTextCursor(cursor)
+        editor.setTextCursor(cursor)
     
     def insert_numbered_list(self):
         """Insert numbered list item."""
-        cursor = self.editor.textCursor()
+        editor = self.get_active_editor()
+        cursor = editor.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
         
         if cursor.atEnd():
@@ -264,7 +288,7 @@ class MarkdownEditor(QWidget):
         else:
             cursor.insertText("1. ")
             
-        self.editor.setTextCursor(cursor)
+        editor.setTextCursor(cursor)
     
     def insert_link(self):
         """Insert link template."""
@@ -276,44 +300,74 @@ class MarkdownEditor(QWidget):
             link_text = "[Link Text](URL)"
         
         cursor.insertText(link_text)
-        self.editor.setTextCursor(cursor)
+        editor = self.get_active_editor()
+        editor.setTextCursor(cursor)
     
     def toggle_preview(self):
-        """Toggle between edit only and edit + preview side by side modes."""
-        self.preview_mode = (self.preview_mode + 1) % 2
+        """Cycle between edit-only, preview-only, and side-by-side modes."""
+        self.view_mode = (self.view_mode + 1) % 3
         
-        if self.preview_mode == 0:  # Edit only
+        if self.view_mode == 0:  # Edit only
             self.stacked_widget.setCurrentIndex(0)
-            # If toolbar exists, keep its tooltip/state in sync; otherwise just switch view
             if hasattr(self, 'preview_btn'):
-                try:
-                    self.preview_btn.setToolTip("Switch to Edit+Preview Mode (Ctrl+P)")
-                except Exception:
-                    pass
-        else:  # Edit + Preview side by side
-            self.stacked_widget.setCurrentIndex(1)
+                self.preview_btn.setToolTip("Switch to Preview Only Mode (Ctrl+P)")
+                self.preview_btn.setChecked(False)
+        elif self.view_mode == 1:  # Preview only
             self._update_preview()
+            self.stacked_widget.setCurrentIndex(2)  # Preview widget index
             if hasattr(self, 'preview_btn'):
-                try:
-                    self.preview_btn.setToolTip("Switch to Edit Only Mode (Ctrl+P)")
-                except Exception:
-                    pass
-
-        # Update checked state if preview_btn exists
-        if hasattr(self, 'preview_btn'):
-            try:
-                self.preview_btn.setChecked(self.preview_mode > 0)
-            except Exception:
-                pass
+                self.preview_btn.setToolTip("Switch to Side-by-Side Mode (Ctrl+P)")
+                self.preview_btn.setChecked(True)
+        else:  # Side-by-side (view_mode == 2)
+            self._update_preview()
+            self.stacked_widget.setCurrentIndex(1)  # Combined widget index
+            if hasattr(self, 'preview_btn'):
+                self.preview_btn.setToolTip("Switch to Edit Only Mode (Ctrl+P)")
+                self.preview_btn.setChecked(True)
+    
+    def _sync_editors(self):
+        """Sync content from main editor to combined editor."""
+        if hasattr(self, 'editor_combined'):
+            # Temporarily disconnect to avoid circular updates
+            self.editor_combined.textChanged.disconnect(self._sync_editors_reverse)
+            self.editor_combined.setPlainText(self.editor.toPlainText())
+            self.editor_combined.textChanged.connect(self._sync_editors_reverse)
+            # Update preview when in side-by-side mode
+            if self.view_mode == 2:
+                self._update_preview()
+    
+    def _sync_editors_reverse(self):
+        """Sync content from combined editor to main editor."""
+        if hasattr(self, 'editor'):
+            # Temporarily disconnect to avoid circular updates
+            self.editor.textChanged.disconnect(self._sync_editors)
+            self.editor.setPlainText(self.editor_combined.toPlainText())
+            self.editor.textChanged.connect(self._sync_editors)
+            # Update preview when in side-by-side mode
+            if self.view_mode == 2:
+                self._update_preview()
     
     def _update_preview(self):
         """Update the preview with rendered markdown."""
-        if self.preview_mode == 0:  # Edit only mode
+        if self.view_mode == 0:  # Edit only mode
             return
             
-        markdown_text = self.editor.toPlainText()
-        html = self._markdown_to_html(markdown_text)
-        self.preview.setHtml(html)
+        # Get text from appropriate editor
+        if self.view_mode == 1:  # Preview only
+            markdown_text = self.editor.toPlainText()
+            html = self._markdown_to_html(markdown_text)
+            self.preview_browser.setHtml(html)
+        elif self.view_mode == 2:  # Side-by-side
+            markdown_text = self.editor_combined.toPlainText()
+            html = self._markdown_to_html(markdown_text)
+            self.preview_combined.setHtml(html)
+    
+    def get_active_editor(self):
+        """Get the currently active editor widget."""
+        if self.view_mode == 2:  # Side-by-side mode
+            return self.editor_combined
+        else:  # Edit-only or preview-only modes
+            return self.editor
     
     def _markdown_to_html(self, markdown_text):
         """Convert markdown to HTML."""
@@ -393,36 +447,51 @@ class MarkdownEditor(QWidget):
     def setMarkdown(self, markdown):
         """Set the content as Markdown."""
         self.editor.setPlainText(markdown)
-        if self.preview_mode > 0:  # Preview mode
+        if hasattr(self, 'editor_combined'):
+            self.editor_combined.setPlainText(markdown)
+        if self.view_mode > 0:  # Preview mode
             self._update_preview()
     
     def toMarkdown(self):
         """Get the content as Markdown."""
-        return self.editor.toPlainText()
+        editor = self.get_active_editor()
+        return editor.toPlainText()
     
     def setPlaceholderText(self, text):
         """Set placeholder text."""
         self.editor.setPlaceholderText(text)
+        if hasattr(self, 'editor_combined'):
+            self.editor_combined.setPlaceholderText(text)
     
     def toPlainText(self):
         """Get plain text content."""
-        return self.editor.toPlainText()
+        editor = self.get_active_editor()
+        return editor.toPlainText()
     
     def setPlainText(self, text):
         """Set plain text content."""
         self.editor.setPlainText(text)
-        if self.preview_mode > 0:  # Preview mode
+        if hasattr(self, 'editor_combined'):
+            self.editor_combined.setPlainText(text)
+        if self.view_mode > 0:  # Preview mode
             self._update_preview()
     
     def clear(self):
         """Clear the editor."""
         self.editor.clear()
-        if self.preview_mode > 0:  # Preview mode
-            self.preview.clear()
+        if hasattr(self, 'editor_combined'):
+            self.editor_combined.clear()
+        if self.view_mode > 0:  # Preview mode
+            if hasattr(self, 'preview_browser'):
+                self.preview_browser.clear()
+            if hasattr(self, 'preview_combined'):
+                self.preview_combined.clear()
     
     def setFocus(self):
         """Set focus to the current active widget."""
-        if self.preview_mode == 0:  # Edit only
+        if self.view_mode == 0:  # Edit only
             self.editor.setFocus()
-        else:  # Edit + Preview side by side
-            self.editor.setFocus()  # Focus on editor
+        elif self.view_mode == 1:  # Preview only
+            self.preview_browser.setFocus()
+        else:  # Side-by-side
+            self.editor_combined.setFocus()  # Focus on editor

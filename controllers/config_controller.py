@@ -168,6 +168,9 @@ class ConfigController:
             self.app_settings.set_setting("notification_unread_color", notification_unread_color)
             self.app_settings.set_setting("notification_read_color", notification_read_color)
             
+            # Save editor settings
+            self.view.save_editor_settings(self.app_settings)
+            
             # Save timezone setting
             timezone = config.get("timezone", "local")
             self.app_settings.set_setting("timezone", timezone)

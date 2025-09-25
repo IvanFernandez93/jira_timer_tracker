@@ -101,6 +101,16 @@ class JiraDetailView(QDialog):
             'padding:4px; border-radius:4px; background:#fff; border:1px solid #ddd;'
         )
         header_layout.addWidget(self.open_jira_btn)
+        
+        # Add button to view Git history
+        self.git_history_btn = QPushButton("📊 Cronologia")
+        self.git_history_btn.setToolTip("Visualizza la cronologia delle modifiche (Git)")
+        self.git_history_btn.setFixedHeight(28)
+        self.git_history_btn.setStyleSheet(
+            'padding:4px; border-radius:4px; background:#fff; border:1px solid #ddd;'
+        )
+        header_layout.addWidget(self.git_history_btn)
+        
         header_layout.addWidget(self.notification_btn)
         
         # Add priority controls to header
@@ -273,12 +283,6 @@ class JiraDetailView(QDialog):
         separator.setFrameShape(QFrame.Shape.HLine)
         separator.setFrameShadow(QFrame.Shadow.Sunken)
         annotations_layout.addWidget(separator)
-        
-        # Add button for showing mentions - in a separate layout for visibility
-        self.show_mentions_btn = QPushButton("Show Tickets Mentioning Me")
-        self.show_mentions_btn.setToolTip("Display tickets where your username is mentioned in comments")
-        self.show_mentions_btn.setStyleSheet("font-size: 14px; padding: 6px 10px; background-color: #f0f8ff;")
-        annotations_layout.addWidget(self.show_mentions_btn)
 
         # Install the annotations tab
         self.tab_widget.addTab(self.annotations_tab, "Personal Notes")

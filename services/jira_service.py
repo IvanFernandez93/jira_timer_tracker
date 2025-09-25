@@ -36,6 +36,84 @@ class JiraService:
         if non_retryable_exceptions:
             default_excs.extend(non_retryable_exceptions)
         self._non_retryable_exceptions = tuple(default_excs)
+        
+        # Cache for fictitious tickets to avoid repeated API calls
+        self._fictitious_tickets = set()
+
+    @staticmethod
+    def is_likely_fictitious_ticket(ticket_key: str) -> bool:
+        """
+        Determines if a ticket key is likely fictitious and shouldn't be fetched from Jira.
+        
+        Args:
+            ticket_key: The Jira ticket key to evaluate
+            
+        Returns:
+            True if the ticket appears to be fictitious, False otherwise
+        """
+        if not ticket_key or not isinstance(ticket_key, str):
+            return True
+            
+        ticket_key = ticket_key.strip().upper()
+        
+        # Common patterns for fictitious tickets (exact matches or contained patterns)
+        fictitious_exact_patterns = [
+            'TEST', 'FAKE', 'DUMMY', 'MOCK', 'SAMPLE', 'EXAMPLE',
+            'FITIZ', 'FITTIZ', 'FITIZZ', 'FITIZZIA', 'FITIZZIO', 'PROVA', 'TEMP', 'TMP',
+            'XXX', 'YYY', 'ZZZ', 'AAA', 'BBB', 'CCC', 'DDD', 'EEE',
+            'ASDF', 'QWERTY', 'ABCD', 'CDFF', 'DFGH'
+        ]
+        
+        # Check for obvious fictitious patterns (must be exact or at start/end)
+        for pattern in fictitious_exact_patterns:
+            if (ticket_key == pattern or 
+                ticket_key.startswith(pattern + '-') or 
+                ticket_key.endswith('-' + pattern) or
+                '-' + pattern + '-' in ticket_key):
+                return True
+                
+        # Check for standard Jira ticket format (PROJECT-NUMBER)
+        # If it contains a dash and has reasonable project code + number, it's likely real
+        if '-' in ticket_key:
+            parts = ticket_key.split('-')
+            if len(parts) == 2:
+                project_part, number_part = parts
+                # Project part: 2-8 letters, Number part: 1+ digits
+                if (2 <= len(project_part) <= 8 and project_part.isalpha() and 
+                    len(number_part) >= 1 and number_part.isdigit()):
+                    return False  # Standard Jira format, likely real
+        
+        # Check for too short keys (less than 4 characters after removing digits and separators)
+        letters_only = ''.join(c for c in ticket_key if c.isalpha())
+        if len(letters_only) < 4:
+            return True
+            
+        # Check for repeating patterns (e.g., "ABAB", "XOXO")
+        if len(ticket_key) >= 4 and ticket_key[:2] == ticket_key[2:4]:
+            return True
+            
+        # Check for obvious keyboard patterns (only if they are the main part of the key)
+        keyboard_patterns = ['QWE', 'ASD', 'ZXC']  # Removed 'ABC' as it's too common
+        for pattern in keyboard_patterns:
+            if (ticket_key == pattern or 
+                ticket_key.startswith(pattern + '-') or 
+                ticket_key.endswith('-' + pattern) or
+                '-' + pattern + '-' in ticket_key):
+                return True
+                
+        # Special check for 'ABC' only if it's the entire ticket or appears suspicious
+        if ticket_key == 'ABC' or ticket_key == 'ABC-' or ticket_key.endswith('-ABC'):
+            return True
+                
+        # Check for sequential numbers as main part (like "123", "456")  
+        if any(seq in ticket_key for seq in ['123', '456', '789', '012']):
+            # Only consider it fictitious if the number sequence is a significant part
+            letters_part = ''.join(c for c in ticket_key if c.isalpha())
+            numbers_part = ''.join(c for c in ticket_key if c.isdigit())
+            if len(numbers_part) >= len(letters_part):  # More numbers than letters
+                return True
+        
+        return False
 
     def connect(self, server_url: str, pat: str):
         """
@@ -194,6 +272,17 @@ class JiraService:
         """
         if not self.is_connected():
             raise ConnectionError("Not connected to Jira.")
+            
+        # Check if this is a known fictitious ticket
+        if issue_key in self._fictitious_tickets:
+            self._logger.debug("Skipping known fictitious ticket: %s", issue_key)
+            raise JIRAError(f"Ticket {issue_key} is marked as fictitious", status_code=404)
+            
+        # Check if ticket appears to be fictitious
+        if self.is_likely_fictitious_ticket(issue_key):
+            self._logger.info("Ticket '%s' appears to be fictitious, marking it and skipping Jira API call", issue_key)
+            self._fictitious_tickets.add(issue_key)
+            raise JIRAError(f"Ticket {issue_key} appears to be fictitious", status_code=404)
         
         def _do_get():
             # Fetch all available fields, plus comments and attachments
@@ -210,8 +299,56 @@ class JiraService:
         try:
             return self._with_retries(_do_get)
         except JIRAError as e:
+            # If we get a 404 (not found), mark this ticket as potentially fictitious
+            if hasattr(e, 'status_code') and e.status_code == 404:
+                self._logger.info("Ticket '%s' returned 404, marking as fictitious to avoid future API calls", issue_key)
+                self._fictitious_tickets.add(issue_key)
+            
             self._logger.error("Error fetching issue '%s': %s", issue_key, getattr(e, 'text', None))
             raise e
+
+    def mark_ticket_as_fictitious(self, issue_key: str) -> None:
+        """
+        Manually mark a ticket as fictitious to avoid future API calls.
+        
+        Args:
+            issue_key: The Jira ticket key to mark as fictitious
+        """
+        if issue_key:
+            self._fictitious_tickets.add(issue_key.strip())
+            self._logger.info("Manually marked ticket '%s' as fictitious", issue_key)
+
+    def unmark_ticket_as_fictitious(self, issue_key: str) -> None:
+        """
+        Remove a ticket from the fictitious list, allowing API calls again.
+        
+        Args:
+            issue_key: The Jira ticket key to remove from fictitious list
+        """
+        if issue_key:
+            self._fictitious_tickets.discard(issue_key.strip())
+            self._logger.info("Removed ticket '%s' from fictitious list", issue_key)
+
+    def is_ticket_marked_as_fictitious(self, issue_key: str) -> bool:
+        """
+        Check if a ticket is marked as fictitious.
+        
+        Args:
+            issue_key: The Jira ticket key to check
+            
+        Returns:
+            True if the ticket is marked as fictitious, False otherwise
+        """
+        return issue_key.strip() in self._fictitious_tickets if issue_key else False
+
+    def get_fictitious_tickets(self) -> list[str]:
+        """
+        Get the list of all tickets marked as fictitious.
+        
+        Returns:
+            List of ticket keys marked as fictitious
+        """
+        return sorted(list(self._fictitious_tickets))
 
     def add_comment(self, issue_key: str, body: str):
         """

@@ -43,3 +43,27 @@ class AppSettings:
             logger.exception("Error setting setting '%s': %s", key, e)
         finally:
             conn.close()
+
+    def get_autosave_draft_interval(self) -> int:
+        """Get the autosave draft interval in seconds (default: 10s)."""
+        return int(self.get_setting('autosave_draft_interval', '10'))
+    
+    def set_autosave_draft_interval(self, interval_seconds: int):
+        """Set the autosave draft interval in seconds."""
+        self.set_setting('autosave_draft_interval', str(interval_seconds))
+    
+    def get_autosave_full_interval(self) -> int:
+        """Get the autosave full save interval in seconds (default: 30s)."""
+        return int(self.get_setting('autosave_full_interval', '30'))
+    
+    def set_autosave_full_interval(self, interval_seconds: int):
+        """Set the autosave full save interval in seconds."""
+        self.set_setting('autosave_full_interval', str(interval_seconds))
+    
+    def get_save_indicator_duration(self) -> int:
+        """Get the save indicator display duration in seconds (default: 2s)."""
+        return int(self.get_setting('save_indicator_duration', '2'))
+    
+    def set_save_indicator_duration(self, duration_seconds: int):
+        """Set the save indicator display duration in seconds."""
+        self.set_setting('save_indicator_duration', str(duration_seconds))

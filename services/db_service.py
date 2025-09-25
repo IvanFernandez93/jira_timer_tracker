@@ -137,6 +137,12 @@ class DatabaseService:
                 print("Adding DeletedAt column to Annotations table")
                 cursor.execute("ALTER TABLE Annotations ADD COLUMN DeletedAt DATETIME")
             
+            try:
+                cursor.execute("SELECT IsFictitious FROM Annotations LIMIT 1")
+            except sqlite3.OperationalError:
+                print("Adding IsFictitious column to Annotations table")
+                cursor.execute("ALTER TABLE Annotations ADD COLUMN IsFictitious INTEGER NOT NULL DEFAULT 0")
+            
             # SyncQueue Table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS SyncQueue (
@@ -274,6 +280,17 @@ class DatabaseService:
                     UNIQUE(JiraKey, AttachmentId)
                 );
             """)
+            
+            # Issue tracking state table for change detection
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS IssueTrackingState (
+                    JiraKey TEXT PRIMARY KEY,
+                    ContentHash TEXT NOT NULL,
+                    TrackingData TEXT NOT NULL,
+                    LastUpdated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            
             conn.commit()
             print("Database initialized successfully.")
         except sqlite3.Error as e:
@@ -325,14 +342,14 @@ class DatabaseService:
 
     # --- Annotation Management ---
 
-    def create_note(self, jira_key: str = None, title: str = "", content: str = "", tags: str = "") -> int:
+    def create_note(self, jira_key: str = None, title: str = "", content: str = "", tags: str = "", is_fictitious: bool = False) -> int:
         """Creates a new note and returns its ID."""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
             cursor.execute(
-                'INSERT INTO Annotations (JiraKey, Title, Content, Tags, IsDeleted) VALUES (?, ?, ?, ?, 0)',
-                (jira_key, title, content, tags)
+                'INSERT INTO Annotations (JiraKey, Title, Content, Tags, IsDeleted, IsFictitious) VALUES (?, ?, ?, ?, 0, ?)',
+                (jira_key, title, content, tags, 1 if is_fictitious else 0)
             )
             conn.commit()
             return cursor.lastrowid
@@ -345,7 +362,7 @@ class DatabaseService:
         try:
             cursor = conn.cursor()
             cursor.execute(
-                'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE Id = ?',
+                'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations WHERE Id = ?',
                 (note_id,)
             )
             row = cursor.fetchone()
@@ -366,7 +383,7 @@ class DatabaseService:
         finally:
             conn.close()
 
-    def update_note(self, note_id: int, jira_key: str = None, title: str = None, content: str = None, tags: str = None):
+    def update_note(self, note_id: int, jira_key: str = None, title: str = None, content: str = None, tags: str = None, is_fictitious: bool = None):
         """Updates a note with the provided fields."""
         conn = self.get_connection()
         try:
@@ -391,6 +408,10 @@ class DatabaseService:
             if tags is not None:
                 updates.append('Tags = ?')
                 params.append(tags)
+                
+            if is_fictitious is not None:
+                updates.append('IsFictitious = ?')
+                params.append(is_fictitious)
             
             if not updates:
                 return
@@ -459,11 +480,11 @@ class DatabaseService:
             cursor = conn.cursor()
             if include_deleted:
                 cursor.execute(
-                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations ORDER BY UpdatedAt DESC'
+                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations ORDER BY UpdatedAt DESC'
                 )
             else:
                 cursor.execute(
-                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE IsDeleted = 0 ORDER BY UpdatedAt DESC'
+                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations WHERE IsDeleted = 0 ORDER BY UpdatedAt DESC'
                 )
             
             notes = []
@@ -477,25 +498,32 @@ class DatabaseService:
                     'is_deleted': bool(row[5]),
                     'deleted_at': row[6],
                     'created_at': row[7],
-                    'updated_at': row[8]
+                    'updated_at': row[8],
+                    'is_fictitious': bool(row[9])
                 })
             return notes
         finally:
             conn.close()
 
     def get_notes_by_jira_key(self, jira_key: str, include_deleted: bool = False) -> list:
-        """Gets all notes for a specific Jira key."""
+        """Gets all notes for a specific Jira key, excluding auto-generated notes."""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
             if include_deleted:
                 cursor.execute(
-                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE JiraKey = ? ORDER BY UpdatedAt DESC',
+                    '''SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious 
+                       FROM Annotations 
+                       WHERE JiraKey = ? AND Title NOT LIKE 'Auto:%' 
+                       ORDER BY UpdatedAt DESC''',
                     (jira_key,)
                 )
             else:
                 cursor.execute(
-                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE JiraKey = ? AND IsDeleted = 0 ORDER BY UpdatedAt DESC',
+                    '''SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious 
+                       FROM Annotations 
+                       WHERE JiraKey = ? AND IsDeleted = 0 AND Title NOT LIKE 'Auto:%' 
+                       ORDER BY UpdatedAt DESC''',
                     (jira_key,)
                 )
             
@@ -510,7 +538,8 @@ class DatabaseService:
                     'is_deleted': bool(row[5]),
                     'deleted_at': row[6],
                     'created_at': row[7],
-                    'updated_at': row[8]
+                    'updated_at': row[8],
+                    'is_fictitious': bool(row[9])
                 })
             return notes
         finally:
@@ -533,9 +562,9 @@ class DatabaseService:
             tag_filter = ' OR '.join(tag_conditions)
             
             if include_deleted:
-                query = f'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE ({tag_filter}) ORDER BY UpdatedAt DESC'
+                query = f'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations WHERE ({tag_filter}) ORDER BY UpdatedAt DESC'
             else:
-                query = f'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE ({tag_filter}) AND IsDeleted = 0 ORDER BY UpdatedAt DESC'
+                query = f'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations WHERE ({tag_filter}) AND IsDeleted = 0 ORDER BY UpdatedAt DESC'
             
             cursor.execute(query, params)
             
@@ -550,7 +579,8 @@ class DatabaseService:
                     'is_deleted': bool(row[5]),
                     'deleted_at': row[6],
                     'created_at': row[7],
-                    'updated_at': row[8]
+                    'updated_at': row[8],
+                    'is_fictitious': bool(row[9])
                 })
             return notes
         finally:
@@ -566,12 +596,12 @@ class DatabaseService:
             
             if include_deleted:
                 cursor.execute(
-                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE (Title LIKE ? OR Content LIKE ? OR JiraKey LIKE ?) ORDER BY UpdatedAt DESC',
+                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations WHERE (Title LIKE ? OR Content LIKE ? OR JiraKey LIKE ?) ORDER BY UpdatedAt DESC',
                     (search_pattern, search_pattern, search_pattern)
                 )
             else:
                 cursor.execute(
-                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt FROM Annotations WHERE (Title LIKE ? OR Content LIKE ? OR JiraKey LIKE ?) AND IsDeleted = 0 ORDER BY UpdatedAt DESC',
+                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations WHERE (Title LIKE ? OR Content LIKE ? OR JiraKey LIKE ?) AND IsDeleted = 0 ORDER BY UpdatedAt DESC',
                     (search_pattern, search_pattern, search_pattern)
                 )
             
@@ -586,7 +616,8 @@ class DatabaseService:
                     'is_deleted': bool(row[5]),
                     'deleted_at': row[6],
                     'created_at': row[7],
-                    'updated_at': row[8]
+                    'updated_at': row[8],
+                    'is_fictitious': bool(row[9])
                 })
             return notes
         finally:
@@ -631,19 +662,27 @@ class DatabaseService:
                 )
             else:
                 cursor.execute(
-                    "INSERT INTO Annotations (JiraKey, Title, Content, IsDeleted) VALUES (?, ?, ?, 0)",
-                    (jira_key, title, content)
+                    "INSERT INTO Annotations (JiraKey, Title, Content, IsDeleted, CreatedAt, UpdatedAt) VALUES (?, ?, ?, 0, ?, ?)",
+                    (jira_key, title, content, current_time, current_time)
                 )
             conn.commit()
         finally:
             conn.close()
 
     def get_annotations(self, jira_key: str) -> list:
-        """Retrieves all annotations for a given Jira key (legacy method)."""
+        """Retrieves all annotations for a given Jira key (legacy method), excluding auto-generated notes."""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute('SELECT Title, Content FROM Annotations WHERE JiraKey = ? AND IsDeleted = 0 ORDER BY Title', (jira_key,))
+            # Exclude auto-generated notes that start with "Auto:"
+            cursor.execute('''
+                SELECT Title, Content 
+                FROM Annotations 
+                WHERE JiraKey = ? 
+                AND IsDeleted = 0 
+                AND Title NOT LIKE 'Auto:%'
+                ORDER BY Title
+            ''', (jira_key,))
             return cursor.fetchall()
         finally:
             conn.close()
@@ -1740,6 +1779,10 @@ class DatabaseService:
             return False
         finally:
             conn.close()
+    
+    # --- Issue Change Tracking ---
+    # Note: Issue change tracking is now handled by GitTrackingService
+    # The IssueTrackingState table is kept for compatibility but not actively used
             
     def close(self):
         if self.conn:
