@@ -110,11 +110,32 @@ jira_timer_tracker/
 - **Mini Timer**: Widget compatto sempre visibile
 - **Time Rounding**: Configurabile (15min, 30min, 1h)
 
-### 📝 Gestione Note
+### 📝 Gestione Note con Versionamento Avanzato
 - **Note per Ticket**: Testo ricco con markdown
+- **🔀 Versionamento Completo**: Sistema snapshot immutabili
+  - **Tracking Automatico**: Ogni modifica (create→draft→commit→restore)
+  - **Cronologia Dettagliata**: Timestamp ISO, autore, tipo operazione
+  - **Diff Engine**: Confronto unified diff tra qualsiasi versione
+  - **Ripristino Intelligente**: Rollback a versione specifica → stato bozza
+  - **Git Integration**: Commit automatici + cronologia Git avanzata
 - **File-System Storage**: Note in cartelle organizzate per JIRA
 - **Allegati**: File allegati ai ticket
 - **Editor Esterno**: Integrazione VS Code/editor esterni
+
+#### Schema Database Versionamento
+```sql
+NoteVersions (
+  Id INTEGER PRIMARY KEY,
+  NoteId INTEGER → Annotations(Id),
+  ContentHash TEXT,           -- SHA256 del contenuto
+  SourceType TEXT,           -- create|draft|commit|manual_restore
+  CommitHash TEXT,           -- Hash Git (se committata)
+  Author TEXT,               -- Utente sistema
+  CreatedAt DATETIME,        -- Timestamp preciso (microsec)
+  Content TEXT,              -- Snapshot completo immutabile
+  [JiraKey, Title, Tags]     -- Metadati snapshot
+)
+```
 
 ### � Ricerca e Filtraggio
 - **JQL Queries**: Supporto completo JIRA Query Language
@@ -208,11 +229,18 @@ python build_standalone.py
 - **Timer Mini**: Widget compatto funzionante
 
 ### 🔄 Refactoring in Corso
-- **Note System**: Migrazione da DB a file-system
-  - Target: Cartelle per JIRA con note .md
-  - Status: Pianificato, servizi progettati
 - **Service Locator**: Centralizzazione dependency injection
 - **Configuration Management**: Unificazione settings
+
+### ✅ Nuove Funzionalità Implementate
+- **🔀 Sistema Versionamento Note Completo** *(Appena Completato)*
+  - **Snapshot Automatici**: Ogni create/draft/commit/restore
+  - **Cronologia Dettagliata**: Timestamp, autore, tipo modifiche
+  - **Ripristino Versioni**: Rollback a qualsiasi versione precedente
+  - **Diff Viewer**: Confronto visuale tra versioni 
+  - **Integrazione Git**: Commit automatici + cronologia avanzata
+  - **Performance**: Indici DB ottimizzati per query veloci
+  - **Storage**: Tabella `NoteVersions` con hash contenuto
 
 ### ⚠️ Known Issues
 - **Requirements Files**: `requirements.txt` mancante (da creare)
@@ -346,12 +374,27 @@ python build/build_standalone.py
 - **Performance**: ⭐⭐⭐⭐ (Buona con ottimizzazioni)
 - **Security**: ⭐⭐⭐⭐ (Credenziali sicure, HTTPS)
 
-### Raccomandazioni Finali
-1. **Priorità Alta**: Completare migrazione note file-system
-2. **Backup Strategy**: Implementare backup automatico prima migrazioni
-3. **CI/CD**: Setup pipeline GitHub Actions
-4. **Monitoring**: Aggiungere logging strutturato e metrics
-5. **User Feedback**: Raccolta feedback per miglioramenti UX
+### Prossimi Passi per UI Versionamento
+1. **UI Cronologia Note**: 
+   - Pannello tabellare: [Timestamp | Tipo | Autore | Hash | Azioni]
+   - Pulsanti: Ripristina | Diff | Dettagli
+2. **Diff Viewer**:
+   - Dialog modale con diff unified evidenziato
+   - Supporto syntax highlighting markdown
+   - Side-by-side comparison (futuro)
+3. **Integrazione Editor**:
+   - Pulsante "Cronologia" in editor note
+   - Auto-save con snapshot (configurabile)
+4. **Git UI**:
+   - Vista separata per cronologia Git vs snapshot DB
+   - Merge/conflict resolution UI (futuro sync cloud)
+
+### Raccomandazioni Finali  
+1. **Priorità Alta**: Implementare UI cronologia versionamento
+2. **Backup Strategy**: Sistema già resiliente con Git + DB snapshots
+3. **Testing**: Aggiungere test GUI per nuovo sistema versioning
+4. **CI/CD**: Setup pipeline GitHub Actions
+5. **User Feedback**: Raccolta feedback sistema versionamento
 
 ---
 

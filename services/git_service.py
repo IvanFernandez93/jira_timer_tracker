@@ -144,36 +144,49 @@ class GitService:
             return None
     
     def get_note_history(self, jira_key: str, note_title: str) -> list:
-        """Get commit history for a specific note."""
+        """Get commit history (hash, message, author, date) for a specific note."""
         try:
             filename = self._get_note_filename(jira_key, note_title)
             file_path = os.path.join(self.repo_path, filename)
-            
             if not os.path.exists(file_path):
                 return []
-            
-            # Get git log for the file
-            result = subprocess.run(['git', 'log', '--oneline', filename], 
-                                  cwd=self.repo_path, 
-                                  capture_output=True, 
-                                  text=True, 
-                                  check=True)
-            
+            # Pretty format: hash|author|iso-date|subject
+            format_str = "%H|%an|%ad|%s"
+            result = subprocess.run(['git', 'log', '--date=iso', f'--pretty=format:{format_str}', filename],
+                                    cwd=self.repo_path,
+                                    capture_output=True,
+                                    text=True,
+                                    check=True)
             history = []
-            for line in result.stdout.strip().split('\\n'):
-                if line:
-                    parts = line.split(' ', 1)
-                    if len(parts) >= 2:
-                        commit_hash = parts[0]
-                        message = parts[1]
-                        history.append({
-                            'commit_hash': commit_hash,
-                            'message': message
-                        })
-            
+            for line in result.stdout.strip().split('\n'):
+                if not line:
+                    continue
+                parts = line.split('|', 3)
+                if len(parts) == 4:
+                    commit_hash, author, date_str, subject = parts
+                    history.append({
+                        'commit_hash': commit_hash.strip(),
+                        'author': author.strip(),
+                        'date': date_str.strip(),
+                        'message': subject.strip(),
+                        'file': filename
+                    })
             return history
         except subprocess.CalledProcessError:
             return []
+
+    def diff_between_commits(self, jira_key: str, note_title: str, commit_a: str, commit_b: str) -> Optional[str]:
+        """Return unified diff string for a note file between two commits."""
+        try:
+            filename = self._get_note_filename(jira_key, note_title)
+            result = subprocess.run(['git', 'diff', f'{commit_a}', f'{commit_b}', '--', filename],
+                                    cwd=self.repo_path,
+                                    capture_output=True,
+                                    text=True,
+                                    check=True)
+            return result.stdout
+        except subprocess.CalledProcessError:
+            return None
     
     def get_note_at_commit(self, jira_key: str, note_title: str, commit_hash: str) -> Optional[str]:
         """Get note content at a specific commit."""

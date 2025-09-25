@@ -162,6 +162,16 @@ class MarkdownEditor(QWidget):
         self.preview_btn.setText("")
         toolbar_layout.addWidget(self.preview_btn)
         
+        # Add separator
+        toolbar_layout.addSpacing(10)
+        
+        # History/Versioning button
+        self.history_btn = ToolButton(FIF.HISTORY)
+        self.history_btn.setToolTip("Cronologia Versioni (Ctrl+H)")
+        self.history_btn.setShortcut(QKeySequence("Ctrl+H"))
+        self.history_btn.setText("")
+        toolbar_layout.addWidget(self.history_btn)
+        
         # Add stretch to push buttons to the left
         toolbar_layout.addStretch()
         
@@ -186,6 +196,11 @@ class MarkdownEditor(QWidget):
                 self.code_btn.clicked.connect(self.toggle_inline_code)
                 self.link_btn.clicked.connect(self.insert_link)
                 self.preview_btn.clicked.connect(self.toggle_preview)
+                
+                # History button connection
+                if hasattr(self, 'history_btn'):
+                    self.history_btn.clicked.connect(self.show_version_history)
+                    
             except Exception:
                 # Best-effort: if toolbar buttons are missing, continue without them
                 pass
@@ -484,9 +499,88 @@ class MarkdownEditor(QWidget):
         if self.view_mode > 0:  # Preview mode
             if hasattr(self, 'preview_browser'):
                 self.preview_browser.clear()
-            if hasattr(self, 'preview_combined'):
-                self.preview_combined.clear()
-    
+        if hasattr(self, 'preview_combined'):
+            self.preview_combined.clear()
+            
+    def show_version_history(self):
+        """Apre il dialog della cronologia versioni per la nota corrente."""
+        try:
+            # Verifica che abbiamo le dipendenze necessarie
+            if not hasattr(self, '_note_manager') or not hasattr(self, '_current_note_id'):
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.information(self, "Info", 
+                    "Cronologia versioni non disponibile.\n"
+                    "Questa funzione richiede che l'editor sia collegato a una nota salvata.")
+                return
+                
+            if not self._current_note_id:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.information(self, "Info",
+                    "Salva prima la nota per accedere alla cronologia delle versioni.")
+                return
+                
+            # Ottieni il titolo della nota
+            note_title = getattr(self, '_current_note_title', f"Nota {self._current_note_id}")
+            
+            # Apri il dialog cronologia
+            from views.note_version_history_dialog import NoteVersionHistoryDialog
+            
+            dialog = NoteVersionHistoryDialog(
+                note_manager=self._note_manager,
+                note_id=self._current_note_id, 
+                note_title=note_title,
+                parent=self
+            )
+            
+            # Connetti il segnale di ripristino
+            dialog.version_restored.connect(self._on_version_restored)
+            
+            dialog.exec()
+            
+        except ImportError as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Errore", f"Impossibile caricare il dialog cronologia: {e}")
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Errore", f"Errore nell'apertura della cronologia: {e}")
+            
+    def set_note_context(self, note_manager, note_id: int, note_title: str = None):
+        """Imposta il contesto della nota per abilitare le funzioni di versionamento."""
+        self._note_manager = note_manager
+        self._current_note_id = note_id
+        self._current_note_title = note_title or f"Nota {note_id}"
+        
+        # Abilita il pulsante cronologia se presente
+        if hasattr(self, 'history_btn'):
+            self.history_btn.setEnabled(True)
+            
+    def clear_note_context(self):
+        """Pulisce il contesto della nota."""
+        self._note_manager = None
+        self._current_note_id = None
+        self._current_note_title = None
+        
+        # Disabilita il pulsante cronologia se presente
+        if hasattr(self, 'history_btn'):
+            self.history_btn.setEnabled(False)
+            
+    def _on_version_restored(self, version_id: int):
+        """Gestisce il ripristino di una versione."""
+        try:
+            # Ricarica il contenuto della nota
+            if self._note_manager and self._current_note_id:
+                note = self._note_manager.db_service.get_note_by_id(self._current_note_id)
+                if note:
+                    # Aggiorna il contenuto nell'editor
+                    self.setPlainText(note.get('content', ''))
+                    
+                    # Emetti segnale di cambio testo per notificare i listener
+                    self.textChanged.emit()
+                    
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Errore", f"Errore nel ripristino: {e}")
+            
     def setFocus(self):
         """Set focus to the current active widget."""
         if self.view_mode == 0:  # Edit only

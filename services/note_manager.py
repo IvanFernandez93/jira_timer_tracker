@@ -154,6 +154,18 @@ class NoteManager(QObject):
                 )
                 
                 self.current_note_state = state
+                # Create initial version snapshot
+                try:
+                    self.db_service.add_note_version(
+                        note_id=note_id,
+                        jira_key=note_data.jira_key,
+                        title=note_data.title,
+                        tags=note_data.tags,
+                        content=note_data.content,
+                        source_type='create'
+                    )
+                except Exception as ve:
+                    logger.warning(f"Unable to add initial note version: {ve}")
                 self.note_saved.emit(note_id, "Nuova nota creata come bozza")
                 self.note_state_changed.emit(state)
                 
@@ -193,6 +205,18 @@ class NoteManager(QObject):
                         'is_draft': True,
                         'draft_saved_at': datetime.now(timezone.utc).isoformat()
                     })
+                # Add draft version snapshot
+                try:
+                    self.db_service.add_note_version(
+                        note_id=note_id,
+                        jira_key=note_data.jira_key,
+                        title=note_data.title,
+                        tags=note_data.tags,
+                        content=note_data.content,
+                        source_type='draft'
+                    )
+                except Exception as ve:
+                    logger.debug(f"Unable to add draft version: {ve}")
                 
                 # Update state
                 if self.current_note_state and self.current_note_state.note_id == note_id:
@@ -261,6 +285,19 @@ class NoteManager(QObject):
                             'is_draft': False,
                             'last_commit_hash': commit_hash
                         })
+                    # Add version snapshot for commit
+                    try:
+                        self.db_service.add_note_version(
+                            note_id=note_id,
+                            jira_key=note_data.jira_key,
+                            title=note_data.title,
+                            tags=note_data.tags,
+                            content=note_data.content,
+                            source_type='commit',
+                            commit_hash=commit_hash
+                        )
+                    except Exception as ve:
+                        logger.debug(f"Unable to add commit version: {ve}")
                     
                     # Update state
                     if self.current_note_state and self.current_note_state.note_id == note_id:
@@ -341,3 +378,38 @@ class NoteManager(QObject):
         except Exception as e:
             logger.error(f"Error getting note history: {e}")
             return []
+
+    # --- Versioning exposed helpers ---
+    def list_versions(self, note_id: int, limit: int = 100) -> List[Dict]:
+        try:
+            return self.db_service.list_note_versions(note_id, limit=limit)
+        except Exception as e:
+            logger.error(f"Error listing versions for note {note_id}: {e}")
+            return []
+
+    def restore_version(self, note_id: int, version_id: int) -> bool:
+        try:
+            ok = self.db_service.restore_note_from_version(note_id, version_id)
+            if ok:
+                # Update state to draft after restore
+                if self.current_note_state and self.current_note_state.note_id == note_id:
+                    self.current_note_state.is_draft = True
+                    self.current_note_state.is_committed = False
+                    self.current_note_state.last_saved = datetime.now(timezone.utc).isoformat()
+                    self.note_state_changed.emit(self.current_note_state)
+                self.note_saved.emit(note_id, "Versione ripristinata come bozza")
+            else:
+                self.note_error.emit("Impossibile ripristinare la versione")
+            return ok
+        except Exception as e:
+            logger.error(f"Error restoring version {version_id} for note {note_id}: {e}")
+            self.note_error.emit(f"Errore nel ripristino versione: {e}")
+            return False
+
+    def diff_versions(self, version_a: int, version_b: int) -> Optional[Dict[str, Any]]:
+        try:
+            return self.db_service.diff_note_versions(version_a, version_b)
+        except Exception as e:
+            logger.error(f"Error diffing versions {version_a} vs {version_b}: {e}")
+            self.note_error.emit(f"Errore nel calcolo diff: {e}")
+            return None

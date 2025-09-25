@@ -235,6 +235,28 @@ class DatabaseService:
                     UNIQUE(JiraKey, Title)
                 );
             """)
+
+            # NoteVersions Table - stores immutable snapshots of note content for history/restore/diff
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS NoteVersions (
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    NoteId INTEGER NOT NULL,
+                    JiraKey TEXT,
+                    Title TEXT NOT NULL,
+                    Tags TEXT,
+                    Content TEXT NOT NULL,
+                    ContentHash TEXT NOT NULL,
+                    SourceType TEXT NOT NULL, -- draft | commit | autosave | manual_restore | create
+                    CommitHash TEXT,
+                    Author TEXT,
+                    CreatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(NoteId) REFERENCES Annotations(Id)
+                );
+            """)
+
+            # Indices for faster history queries
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_noteversions_noteid_createdat ON NoteVersions(NoteId, CreatedAt DESC);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_noteversions_commithash ON NoteVersions(CommitHash);")
             
             # JiraIssueCache Table - For storing Jira issue details offline
             cursor.execute("""
@@ -486,6 +508,110 @@ class DatabaseService:
             conn.commit()
         finally:
             conn.close()
+
+    # --- Note Versioning Methods ---
+    def add_note_version(self, note_id: int, jira_key: str, title: str, tags: str, content: str, source_type: str, commit_hash: str = None, author: str = None) -> int:
+        """Create an immutable version snapshot for a note.
+
+        Args:
+            note_id: Id in Annotations
+            jira_key: Jira key (may be None)
+            title: Note title at this version
+            tags: Tags at this version
+            content: Full markdown/text content
+            source_type: draft|commit|autosave|manual_restore|create
+            commit_hash: Optional git commit hash
+            author: Optional author string (fallback to system user)
+        """
+        import hashlib, getpass
+        from datetime import datetime, timezone
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            content_hash = hashlib.sha256((content or '').encode('utf-8')).hexdigest()
+            author_val = author or getpass.getuser()
+            # Use explicit timestamp with microseconds for better ordering
+            current_time = datetime.now(timezone.utc).isoformat()
+            cursor.execute(
+                '''INSERT INTO NoteVersions (NoteId, JiraKey, Title, Tags, Content, ContentHash, SourceType, CommitHash, Author, CreatedAt)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (note_id, jira_key, title, tags, content, content_hash, source_type, commit_hash, author_val, current_time)
+            )
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
+
+    def list_note_versions(self, note_id: int, limit: int = 100) -> list:
+        """Return versions metadata for a note ordered newest first."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''SELECT Id, NoteId, JiraKey, Title, Tags, substr(Content,1,200) AS Preview, ContentHash, SourceType, CommitHash, Author, CreatedAt
+                   FROM NoteVersions WHERE NoteId = ? ORDER BY CreatedAt DESC LIMIT ?''',
+                (note_id, limit)
+            )
+            rows = cursor.fetchall()
+            versions = []
+            for r in rows:
+                versions.append({
+                    'id': r[0],
+                    'note_id': r[1],
+                    'jira_key': r[2],
+                    'title': r[3],
+                    'tags': r[4] or '',
+                    'preview': r[5] or '',
+                    'content_hash': r[6],
+                    'source_type': r[7],
+                    'commit_hash': r[8],
+                    'author': r[9],
+                    'created_at': r[10]
+                })
+            return versions
+        finally:
+            conn.close()
+
+    def get_note_version_content(self, version_id: int) -> str:
+        """Return full content for a specific version id."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT Content FROM NoteVersions WHERE Id = ?', (version_id,))
+            row = cursor.fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    def restore_note_from_version(self, note_id: int, version_id: int) -> bool:
+        """Replace note content with a previous version and create a new version snapshot."""
+        content = self.get_note_version_content(version_id)
+        if content is None:
+            return False
+        # Load note to capture metadata
+        note = self.get_note_by_id(note_id)
+        if not note:
+            return False
+        # Update note content as draft (to allow review before commit)
+        self.update_note(note_id, content=content, is_draft=True)
+        # Add snapshot marking restore
+        self.add_note_version(note_id, note.get('jira_key'), note.get('title'), note.get('tags',''), content, source_type='manual_restore')
+        return True
+
+    def diff_note_versions(self, version_id_a: int, version_id_b: int) -> dict:
+        """Produce a simple line diff between two versions."""
+        import difflib
+        content_a = self.get_note_version_content(version_id_a) or ''
+        content_b = self.get_note_version_content(version_id_b) or ''
+        a_lines = content_a.splitlines(keepends=False)
+        b_lines = content_b.splitlines(keepends=False)
+        diff_lines = list(difflib.unified_diff(a_lines, b_lines, fromfile=f'version_{version_id_a}', tofile=f'version_{version_id_b}', lineterm=''))
+        return {
+            'version_a': version_id_a,
+            'version_b': version_id_b,
+            'diff': '\n'.join(diff_lines),
+            'lines_changed': sum(1 for l in diff_lines if l.startswith('+ ') or l.startswith('- '))
+        }
 
     def save_note_as_draft(self, jira_key: str = None, title: str = None, content: str = "", tags: str = "", note_id: int = None, is_fictitious: bool = False) -> int:
         """Save a note as draft. Creates new note if note_id is None, updates existing otherwise."""

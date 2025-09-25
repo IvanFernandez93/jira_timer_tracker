@@ -1,28 +1,39 @@
 🎯 SVILUPPI FUTURI DA REALIZZARE
-1. Gestione Completa della Cronologia delle Note
-Versionamento Note: Implementare un sistema per salvare automaticamente versioni precedenti delle note.
-Ripristino Versioni: Permettere agli utenti di ripristinare una versione precedente di una nota.
-Diff Viewer: Visualizzare le differenze tra versioni delle note.
-Cronologia Dettagliata: Mostrare timestamp, autore e modifiche per ogni versione della nota.
-Integrazione Git: Collegare la cronologia delle note a un repository Git per versionamento avanzato.
-2. Miglioramenti al Pannello di Configurazione
+
+✅ ~~1. Gestione Completa della Cronologia delle Note~~ **[COMPLETATO v2.3.0]**
+~~Versionamento Note: Implementare un sistema per salvare automaticamente versioni precedenti delle note.~~
+~~Ripristino Versioni: Permettere agli utenti di ripristinare una versione precedente di una nota.~~
+~~Diff Viewer: Visualizzare le differenze tra versioni delle note.~~
+~~Cronologia Dettagliata: Mostrare timestamp, autore e modifiche per ogni versione della nota.~~
+~~Integrazione Git: Collegare la cronologia delle note a un repository Git per versionamento avanzato.~~
+
+**📝 SISTEMA CRONOLOGIA NOTE IMPLEMENTATO:**
+- ✅ Versionamento automatico (snapshot su create/draft/commit/restore)
+- ✅ Dialog cronologia con tabella dettagliata (timestamp, autore, tipo, hash, commit Git)
+- ✅ Ripristino versioni sicuro (converte in bozza per ulteriori modifiche)
+- ✅ Diff viewer esterni (VS Code, Beyond Compare, WinMerge, Notepad++, Git)
+- ✅ Integrazione Git completa (commit automatici, cronologia, diff Git-level)
+- ✅ UI integrata nel markdown editor (pulsante cronologia + Ctrl+H)
+- ✅ Auto-detection tool diff disponibili + gestione file temporanei
+- ✅ Testing completo backend + UI + integration diff esterni
+1. Miglioramenti al Pannello di Configurazione
 Configurazione Colori e Label Priorità: Risolvere il problema che impedisce la modifica dei colori e delle etichette delle priorità dal pannello di configurazione.
 Data di Aggiornamento: Aggiungere un campo per la data di aggiornamento nel pannello di configurazione e fornire un feedback visivo quando si preme "Salva".
 Feedback UI Migliorato: Mostrare un messaggio di conferma o un indicatore visivo per informare l'utente che le modifiche sono state salvate correttamente.
-3. Ottimizzazione della Ricerca nelle Note
+2. Ottimizzazione della Ricerca nelle Note
 Ricerca Limitata alla Descrizione: Modificare la funzionalità di ricerca nelle note per limitarla solo alla descrizione, evitando di cercare in campi non rilevanti.
 Ricerca Avanzata: Aggiungere opzioni per case sensitivity, ricerca semantica e regex.
-4. Ottimizzazione del Commit delle Note
+3. Ottimizzazione del Commit delle Note
 Performance Commit: Risolvere il problema di rallentamento significativo durante il commit delle note.
 Profilazione Runtime: Analizzare il codice per identificare colli di bottiglia e ottimizzare la gestione del commit.
 Feedback UI: Mostrare un indicatore di progresso durante il commit per informare l'utente.
-5. Bug: Download Allegati
+4. Bug: Download Allegati
 Problema: Gli allegati si scaricano correttamente sul browser, ma l'applicazione non riesce più a scaricarli.
 Soluzione: Verificare la gestione delle API JIRA per il download degli allegati e correggere eventuali errori di autenticazione o endpoint.
-6. Funzionalità: Copia Chiave JIRA
+5. Funzionalità: Copia Chiave JIRA
 Possibilità di Copiare la Chiave: Aggiungere un pulsante o un'opzione nel dettaglio JIRA per copiare facilmente la chiave del ticket.
 Shortcut: Implementare una scorciatoia da tastiera per copiare la chiave (es. Ctrl+Shift+C).
-7. Funzionalità: Apertura Multipla delle Note
+6. Funzionalità: Apertura Multipla delle Note
 Aprire Più Note: Consentire agli utenti di aprire più note contemporaneamente in finestre separate.
 Gestione Finestre: Implementare un sistema di gestione delle finestre per evitare conflitti tra note aperte.
 8. Integrazione AI per Automazione

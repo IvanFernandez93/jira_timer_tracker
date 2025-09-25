@@ -504,6 +504,9 @@ class NotesManagerDialog(QDialog, SearchableMixin):
         self.fictitious_cb.setChecked(True)  # ATTIVATO DI DEFAULT per tutte le nuove note
         self.content_edit.setMarkdown("")
         self.info_label.clear()
+        
+        # Clear note context for versioning
+        self.content_edit.clear_note_context()
 
     def on_note_selected(self):
         """Handle note selection in the table."""
@@ -544,6 +547,10 @@ class NotesManagerDialog(QDialog, SearchableMixin):
             self.content_edit.setMarkdown(content)
             self._last_content_hash = hash(content)
             self._content_changed = False
+            
+            # Set note context for versioning functionality
+            note_title = note.get('title', '') or f"Nota {note_id}"
+            self.content_edit.set_note_context(self.note_manager, note_id, note_title)
 
             # Set the appropriate editing mode based on note state
             if state.is_draft:
