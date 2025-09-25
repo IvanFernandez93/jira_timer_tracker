@@ -236,6 +236,7 @@ class NotesFileSystemManager:
     def _parse_markdown_metadata(self, content: str) -> dict:
         """
         Parse YAML front matter from markdown content.
+        Handles malformed files with duplicate YAML blocks.
         
         Args:
             content: Full markdown content
@@ -251,6 +252,16 @@ class NotesFileSystemManager:
                 if len(parts) >= 3:
                     yaml_content = parts[1].strip()
                     markdown_content = parts[2].strip()
+                    
+                    # Check if markdown_content starts with another YAML block (malformed file)
+                    if markdown_content.startswith('---'):
+                        logger.warning("Detected malformed file with duplicate YAML blocks, cleaning up...")
+                        # Find the last occurrence of YAML block and extract only the actual content
+                        yaml_blocks = markdown_content.split('---')
+                        if len(yaml_blocks) >= 3:
+                            # Skip the empty first part and the YAML content, get the actual content
+                            actual_content = '---'.join(yaml_blocks[2:]).strip()
+                            markdown_content = actual_content
                     
                     # Parse YAML manually (simple key: value format)
                     metadata = self._parse_simple_yaml(yaml_content)

@@ -14,6 +14,7 @@ from PyQt6.QtGui import QIcon, QPixmap, QAction, QCursor
 from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QObject
 
 from services.attachment_service import AttachmentService
+from views.universal_search_widget import UniversalSearchWidget, SearchableMixin
 from qfluentwidgets import FluentIcon
 
 class DownloadWorker(QObject):
@@ -241,7 +242,7 @@ class AttachmentItem(QWidget):
             self.download_btn.setEnabled(True)
 
 
-class AttachmentsDialog(QDialog):
+class AttachmentsDialog(QDialog, SearchableMixin):
     """Dialog for managing attachments of a Jira issue."""
     
     def __init__(self, jira_key: str, attachment_service: AttachmentService, parent=None):
@@ -264,6 +265,10 @@ class AttachmentsDialog(QDialog):
         self.setup_ui()
         self.setWindowTitle(f"Attachments for {jira_key}")
         self.resize(600, 400)
+        
+        # Initialize universal search functionality
+        self.init_search_functionality()
+        self._setup_search_targets()
         
     def setup_ui(self):
         """Set up the dialog UI."""
@@ -702,3 +707,13 @@ class AttachmentsDialog(QDialog):
             self.download_thread.wait()
             
         super().closeEvent(event)
+
+    def _setup_search_targets(self):
+        """Configura i target per la ricerca universale in AttachmentsDialog."""
+        try:
+            # Aggiungi la lista degli attachments come target di ricerca
+            if hasattr(self, 'attachments_list'):
+                self.add_searchable_widget(self.attachments_list)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Error setting up search targets in AttachmentsDialog: {e}")

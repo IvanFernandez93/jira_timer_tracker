@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushBut
                              QSizePolicy, QToolButton, QComboBox)
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QKeySequence
+from views.universal_search_widget import UniversalSearchWidget, SearchableMixin
 # QShortcut may be provided under QtWidgets or QtGui depending on PyQt6 build
 try:
     from PyQt6.QtWidgets import QShortcut
@@ -34,7 +35,7 @@ class EmojiPickerDialog(QDialog):
         self.accept()
 
 
-class JiraDetailView(QDialog):
+class JiraDetailView(QDialog, SearchableMixin):
     """
     A dialog to display the full details of a single Jira issue.
     Fulfills requirement 2.4.
@@ -51,6 +52,9 @@ class JiraDetailView(QDialog):
         # In questo modo ogni finestra sarà indipendente
 
         main_layout = QVBoxLayout(self)
+
+        # Initialize universal search functionality
+        self.init_search_functionality()
 
         # 1. Header (Req 2.4.1)
         header_layout = QHBoxLayout()
@@ -460,6 +464,39 @@ class JiraDetailView(QDialog):
         self.tab_widget.addTab(self.issue_links_tab, "Linked Issues")
 
         self.tab_widget.setCurrentIndex(0) # Default to Details tab
+        
+        # Add search targets for universal search
+        self._setup_search_targets()
+
+    def _setup_search_targets(self):
+        """Configura i target per la ricerca universale in JiraDetailView."""
+        try:
+            # Aggiungi i widget di testo come target di ricerca
+            if hasattr(self, 'details_browser'):
+                self.add_searchable_widget(self.details_browser)
+            
+            if hasattr(self, 'comments_browser'):
+                self.add_searchable_widget(self.comments_browser)
+                
+            if hasattr(self, 'new_comment_input'):
+                self.add_searchable_widget(self.new_comment_input)
+            
+            # Aggiungi i widget delle note personali quando vengono creati
+            if hasattr(self, 'notes_tab_widget'):
+                for i in range(self.notes_tab_widget.count()):
+                    widget = self.notes_tab_widget.widget(i)
+                    # Cerca i QTextEdit all'interno di ogni tab
+                    text_edits = widget.findChildren(QTextEdit)
+                    for text_edit in text_edits:
+                        self.add_searchable_widget(text_edit)
+            
+            # Aggiungi il tree widget dei linked issues
+            if hasattr(self, 'issue_links_tree'):
+                self.add_searchable_widget(self.issue_links_tree)
+                
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Error setting up search targets in JiraDetailView: {e}")
 
     def create_attachment_widget(self, filename, size_kb, attachment_data):
         """Creates a widget for an attachment with loading indicator and thumbnail preview."""

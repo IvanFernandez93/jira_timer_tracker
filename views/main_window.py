@@ -8,11 +8,12 @@ from qfluentwidgets import Theme, setTheme, isDarkTheme
 from .notification_indicator import NotificationIndicator
 from .sync_status_indicator import SyncStatusIndicator
 from .network_status_indicator import NetworkStatusIndicator
+from .universal_search_widget import UniversalSearchWidget, SearchableMixin
 
 from .jira_grid_view import JiraGridView
 from .history_view import HistoryView
 
-class MainWindow(FluentWindow):
+class MainWindow(FluentWindow, SearchableMixin):
     windowStateChanged = pyqtSignal(Qt.WindowState)
     # Define new signals for navigation actions
     lastActiveRequested = pyqtSignal()
@@ -122,6 +123,10 @@ class MainWindow(FluentWindow):
             onClick=self.onSettingsClicked
         )
         self.settings_item.setToolTip("Impostazioni dell'applicazione e temi")
+        
+        # Initialize universal search functionality (deferred)
+        # We'll initialize this after the UI is fully loaded
+        self.search_initialized = False
 
     @pyqtSlot()
     def onLastActiveClicked(self):
@@ -275,12 +280,52 @@ class MainWindow(FluentWindow):
             pass
         # Chiamiamo il metodo della classe base per gestire normalmente l'evento
         return super().mousePressEvent(event)
+    
+    def showEvent(self, event):
+        """Chiamato quando la finestra viene mostrata."""
+        super().showEvent(event)
+        # Inizializza la ricerca quando la finestra è completamente visibile
+        self.initialize_search_when_ready()
         
     def focusInEvent(self, event):
         """Assicura che la finestra principale venga attivata correttamente quando riceve il focus."""
         try:
             self.raise_()
             self.activateWindow()
+            # Tenta di impostare il focus sul widget di ricerca se è aperto
+            if hasattr(self, 'search_widget') and self.search_widget.isVisible():
+                pass
         except Exception:
             pass
         return super().focusInEvent(event)
+
+    def _setup_search_targets(self):
+        """Configura i target per la ricerca universale nella MainWindow."""
+        try:
+            # Aggiungi le viste principali come target di ricerca
+            if hasattr(self, 'jira_grid_view'):
+                # La grid view ha un widget table interno che può essere cercato
+                if hasattr(self.jira_grid_view, 'jira_table'):
+                    self.add_searchable_widget(self.jira_grid_view.jira_table)
+            
+            if hasattr(self, 'history_view'):
+                # La history view ha un widget table per la cronologia
+                if hasattr(self.history_view, 'history_table'):
+                    self.add_searchable_widget(self.history_view.history_table)
+                    
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Error setting up search targets in MainWindow: {e}")
+    
+    def initialize_search_when_ready(self):
+        """Inizializza la ricerca universale quando l'interfaccia è completamente caricata."""
+        if not self.search_initialized:
+            try:
+                self.init_search_functionality()
+                # Aspetta un momento per essere sicuri che le viste siano caricate
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(100, self._setup_search_targets)
+                self.search_initialized = True
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Error initializing search in MainWindow: {e}")

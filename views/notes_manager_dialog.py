@@ -1,4 +1,5 @@
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from pathlib import Path
 from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QWidget, QLabel, QDialog,
     QTableWidget, QTableWidgetItem, QAbstractScrollArea, QHeaderView,
@@ -18,6 +19,7 @@ import logging
 
 from views.markdown_editor import MarkdownEditor
 from services.note_manager import NoteManager, NoteData, NoteState
+from views.universal_search_widget import UniversalSearchWidget, SearchableMixin
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,7 @@ class SortableTableItem(QTableWidgetItem):
             return self._sort_key < other._sort_key
         return super().__lt__(other)
 
-class NotesManagerDialog(QDialog):
+class NotesManagerDialog(QDialog, SearchableMixin):
     """Dialog for complete notes management with CRUD operations, tags, and soft delete."""
     
     # Segnali per richiedere l'apertura di altre viste
@@ -51,10 +53,16 @@ class NotesManagerDialog(QDialog):
         # Initialize advanced note management system
         from services.git_service import GitService
         from services.notes_filesystem_manager import NotesFileSystemManager
+        from services.file_watcher_service import FileWatcherService
         
         self.git_service = GitService()
         self.note_manager = NoteManager(self.db_service, self.git_service)
         self.fs_manager = NotesFileSystemManager()  # File system manager per cartelle JIRA
+        
+        # Initialize file watcher for external changes
+        self.file_watcher = FileWatcherService(self.fs_manager, self.db_service)
+        self.file_watcher.file_changed_externally.connect(self._on_file_changed_externally)
+        self.file_watcher.file_deleted_externally.connect(self._on_file_deleted_externally)
         
         # Current state tracking
         self.current_note_id = None
@@ -86,6 +94,9 @@ class NotesManagerDialog(QDialog):
 
         # Main layout with splitter
         self.main_layout = QVBoxLayout(self)
+
+        # Initialize universal search functionality
+        self.init_search_functionality()
 
         # Header section
         self.header_layout = QHBoxLayout()
@@ -334,6 +345,9 @@ class NotesManagerDialog(QDialog):
         # Load initial data
         self.load_tags()
         self.load_notes()
+        
+        # Add search targets for universal search
+        self._setup_search_targets()
 
     def load_tags(self):
         """Load all available tags for the filter combo."""
@@ -534,8 +548,12 @@ class NotesManagerDialog(QDialog):
             # Set the appropriate editing mode based on note state
             if state.is_draft:
                 self._set_note_editing_mode('draft')
+                # Mostra messaggio di aiuto per le bozze
+                self._show_help_message("📝 NOTA IN BOZZA: Puoi modificare liberamente. Auto-save attivo!")
             else:
                 self._set_note_editing_mode('committed')
+                # Mostra messaggio di aiuto per le note committe
+                self._show_help_message("🔒 NOTA COMMITTED: Clicca 'MODIFICA NOTA' per renderla modificabile")
                 
             # Store the current note state object for reference
             self.current_note_state = state
@@ -573,6 +591,14 @@ class NotesManagerDialog(QDialog):
 
             # Restart auto-save for the loaded note
             self.note_manager.start_auto_save()
+            
+            # Add note to file watcher for external change detection
+            self.file_watcher.add_note_to_watch(
+                note_id,
+                note.get('jira_key', ''),
+                note.get('title', ''),
+                content
+            )
 
         except Exception as e:
             QMessageBox.warning(self, "Errore", f"Errore nel caricamento della nota: {str(e)}")
@@ -587,12 +613,18 @@ class NotesManagerDialog(QDialog):
                     self.content_edit.toMarkdown().strip() or 
                     self.jira_key_edit.text().strip()):
                     self.auto_save_timer.start(1000)  # 1 secondo per note nuove
-                    self._update_draft_status_label("✨ Salvataggio automatico in corso...")
+                    self._update_draft_status_label("⏳ Salvataggio in corso... (1 sec)")
+                    # Aggiorna anche il pulsante
+                    if hasattr(self, 'save_btn'):
+                        self.save_btn.setText("⏳ Salvataggio...")
                     
             elif self.current_note_state.state_name == 'draft':
                 # Per bozze: auto-save normale
                 self.auto_save_timer.start(self.auto_save_delay)
-                self._update_draft_status_label("📝 Modifiche in corso...")
+                self._update_draft_status_label(f"✏️ Modifiche rilevate... (salvataggio tra {self.auto_save_delay//1000} sec)")
+                # Aggiorna anche il pulsante
+                if hasattr(self, 'save_btn'):
+                    self.save_btn.setText("✏️ Modifiche rilevate")
 
     def save_note(self):
         """Save the current note."""
@@ -737,7 +769,15 @@ class NotesManagerDialog(QDialog):
         
     def _on_note_saved(self, note_id: int, message: str):
         """Handle successful note save."""
-        self._update_draft_status_label(f"✓ {message}")
+        # Messaggio più visibile per l'utente
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        save_message = f"💾 Auto-salvato alle {timestamp}"
+        self._update_draft_status_label(save_message)
+        
+        # Aggiorna anche il pulsante save per mostrare l'ultimo salvataggio
+        if hasattr(self, 'save_btn') and self.current_editing_mode == 'draft':
+            self.save_btn.setText(f"💾 Salvato {timestamp}")
+            
         self.load_notes()
         
     def _on_note_error(self, error_message: str):
@@ -776,8 +816,12 @@ class NotesManagerDialog(QDialog):
             self.tags_edit.setReadOnly(False)
             self.fictitious_cb.setEnabled(True)
             
-            # Pulsanti per draft
-            self.save_btn.setVisible(False)  # Auto-save attivo
+            # Pulsanti per draft - Mostra lo status dell'auto-save
+            self.save_btn.setVisible(True)  # Visibile per feedback auto-save
+            self.save_btn.setText("💾 Auto-Save ON")
+            self.save_btn.setEnabled(False)  # Non cliccabile ma visibile
+            self.save_btn.setToolTip("Salvataggio automatico attivo - le modifiche vengono salvate automaticamente")
+            
             self.commit_btn.setText("Commit")
             self.commit_btn.setEnabled(True)
             self.commit_btn.setToolTip("Commit definitivo (readonly)")
@@ -798,8 +842,11 @@ class NotesManagerDialog(QDialog):
             self.tags_edit.setReadOnly(False)
             self.fictitious_cb.setEnabled(True)
             
-            # Pulsanti per nuova nota - NO pulsante bozza, auto-save attivo
-            self.save_btn.setVisible(False)  # Nessun pulsante bozza, tutto automatico
+            # Pulsanti per nuova nota - Mostra status auto-save
+            self.save_btn.setVisible(True)  # Visibile per feedback
+            self.save_btn.setText("💾 Auto-Save ON")
+            self.save_btn.setEnabled(False)  # Non cliccabile ma visibile
+            self.save_btn.setToolTip("Salvataggio automatico - inizia quando inserisci i dati")
             
             self.commit_btn.setText("Commit")
             self.commit_btn.setEnabled(False)  # Abilitato solo dopo primo salvataggio auto
@@ -1010,12 +1057,16 @@ class NotesManagerDialog(QDialog):
             self.title_edit.setReadOnly(False) 
             self.tags_edit.setReadOnly(False)
             
-            # Button visibility - NO MORE SAVE BUTTON
-            self.save_btn.setVisible(False)  # Nascosto - salvataggio automatico
+            # Button visibility - SEMPRE VISIBILI per chiarezza
+            self.save_btn.setVisible(True)
+            self.save_btn.setText("Auto-Save ATTIVO")  # Rimossa emoji - usa solo icona
+            self.save_btn.setEnabled(True)  # Abilitato per permettere salvataggio manuale
+            self.save_btn.setToolTip("Auto-save attivo! Clicca per salvare immediatamente o aspetta 3 secondi")
             
             self.commit_btn.setVisible(True)
-            self.commit_btn.setText("✅ Commit")
-            self.commit_btn.setToolTip("Committa la nota (readonly)")
+            self.commit_btn.setText("Commit")  # Rimossa emoji - usa solo icona
+            self.commit_btn.setEnabled(True)
+            self.commit_btn.setToolTip("Committa la nota (diventerà readonly)")
             
             self.delete_btn.setVisible(True)
             self.delete_btn.setEnabled(True)
@@ -1030,30 +1081,36 @@ class NotesManagerDialog(QDialog):
             self.title_edit.setReadOnly(True)
             self.tags_edit.setReadOnly(True)
             
-            # Button visibility - special committed mode
+            # Button visibility - SEMPRE VISIBILI con funzioni chiare
             self.save_btn.setVisible(True)
-            self.save_btn.setText("✏️ Modifica")  
-            self.save_btn.setToolTip("Converti in bozza per modificare")
+            self.save_btn.setText("MODIFICA NOTA")  # Rimossa emoji duplicata - usa solo icona
+            self.save_btn.setEnabled(True)
+            self.save_btn.setToolTip("Clicca per rendere modificabile questa nota")
             
             self.commit_btn.setVisible(True)
-            self.commit_btn.setText("📊 Storia") 
-            self.commit_btn.setToolTip("Visualizza cronologia git")
+            self.commit_btn.setText("Cronologia")  # Rimossa emoji - usa solo icona
+            self.commit_btn.setEnabled(True)
+            self.commit_btn.setToolTip("Visualizza cronologia delle modifiche")
             
             self.delete_btn.setVisible(True)
+            self.delete_btn.setEnabled(True)
             self.delete_btn.setEnabled(True)
             
             # UI styling - readonly
             self._apply_editing_styles(True)
             
         elif note_state == 'new':
-            # NEW: Content editable, auto-save attivato, no manual save button
+            # NEW: Content editable, auto-save attivato, feedback visibile
             self.content_edit.setReadOnly(False)
             self.jira_key_edit.setReadOnly(False)
             self.title_edit.setReadOnly(False)
             self.tags_edit.setReadOnly(False)
             
-            # Button visibility - NO SAVE BUTTON
-            self.save_btn.setVisible(False)  # Nascosto - salvataggio automatico attivo
+            # Button visibility - MOSTRA STATUS AUTO-SAVE
+            self.save_btn.setVisible(True)  # Visibile per feedback
+            self.save_btn.setText("💾 Auto-Save ON")
+            self.save_btn.setEnabled(False)  # Non cliccabile ma visibile
+            self.save_btn.setToolTip("Salvataggio automatico - inizia quando inserisci i dati")
             
             self.commit_btn.setVisible(False)  # No commit until saved as draft
             self.delete_btn.setVisible(False)  # No delete for unsaved notes
@@ -1475,6 +1532,10 @@ class NotesManagerDialog(QDialog):
                         is_fictitious=note_data.is_fictitious
                     )
                     
+                    # Ignora il prossimo cambiamento del file watcher (per evitare loop)
+                    if fs_success and file_path:
+                        self.file_watcher.ignore_next_change(str(file_path))
+                    
                     now = datetime.now().strftime("%H:%M:%S")
                     if fs_success:
                         self._update_draft_status_label(f"💾 Auto-salvato alle {now} in {file_path.parent.name}/")
@@ -1485,9 +1546,228 @@ class NotesManagerDialog(QDialog):
             logger.error(f"Auto-save failed: {e}")
             self._update_draft_status_label(f"❌ Errore salvataggio: {str(e)[:50]}...")
 
+    def _on_file_changed_externally(self, note_id: int, file_path: str, new_content: str):
+        """
+        Gestisce quando un file di nota viene modificato esternamente.
+        
+        Args:
+            note_id: ID della nota modificata
+            file_path: Percorso del file modificato
+            new_content: Nuovo contenuto del file
+        """
+        try:
+            logger.info(f"External change detected for note {note_id}: {file_path}")
+            
+            # Parse il contenuto del file per estrarre metadati e contenuto
+            parsed_data = self.fs_manager._parse_markdown_metadata(new_content)
+            
+            # Se stiamo attualmente visualizzando questa nota
+            if self.current_note_id == note_id:
+                # Controlla se il contenuto nell'editor è diverso dal nuovo contenuto del file
+                current_content = self.content_edit.toPlainText()
+                parsed_content = parsed_data.get('content', '')
+                
+                if current_content != parsed_content:
+                    # Mostra un dialog di conferma
+                    from PyQt6.QtWidgets import QMessageBox
+                    
+                    msg = QMessageBox(self)
+                    msg.setIcon(QMessageBox.Icon.Question)
+                    msg.setWindowTitle("File modificato esternamente")
+                    msg.setText(f"Il file della nota è stato modificato esternamente:")
+                    msg.setInformativeText(f"File: {Path(file_path).name}\n\n"
+                                         "Vuoi aggiornare il contenuto nell'applicazione con le modifiche esterne?")
+                    
+                    update_btn = msg.addButton("Aggiorna", QMessageBox.ButtonRole.AcceptRole)
+                    keep_btn = msg.addButton("Mantieni versione locale", QMessageBox.ButtonRole.RejectRole)
+                    msg.setDefaultButton(update_btn)
+                    
+                    msg.exec()
+                    
+                    if msg.clickedButton() == update_btn:
+                        # Aggiorna tutti i campi con i dati parsati
+                        self.content_edit.setPlainText(parsed_content)
+                        
+                        # Aggiorna anche i metadati se presenti
+                        if 'title' in parsed_data and parsed_data['title']:
+                            self.title_edit.setText(str(parsed_data['title']))
+                        
+                        if 'jira_key' in parsed_data and parsed_data['jira_key']:
+                            self.jira_key_edit.setText(str(parsed_data['jira_key']))
+                        
+                        if 'tags' in parsed_data and parsed_data['tags']:
+                            self.tags_edit.setText(str(parsed_data['tags']))
+                        
+                        if 'fictitious' in parsed_data:
+                            self.fictitious_cb.setChecked(bool(parsed_data['fictitious']))
+                        
+                        # Aggiorna anche nel database
+                        update_data = {
+                            'content': parsed_content
+                        }
+                        if 'title' in parsed_data:
+                            update_data['title'] = str(parsed_data['title'])
+                        if 'jira_key' in parsed_data:
+                            update_data['jira_key'] = str(parsed_data['jira_key'])
+                        if 'tags' in parsed_data:
+                            update_data['tags'] = str(parsed_data['tags'])
+                        if 'fictitious' in parsed_data:
+                            update_data['is_fictitious'] = bool(parsed_data['fictitious'])
+                        
+                        self.db_service.update_note(note_id, **update_data)
+                        
+                        # Aggiorna l'hash per il file watcher
+                        import hashlib
+                        new_hash = hashlib.md5(new_content.encode('utf-8')).hexdigest()
+                        self._last_content_hash = hash(new_content)
+                        
+                        self._update_draft_status_label("📁 Aggiornato da file esterno")
+                        
+                        logger.info(f"Note {note_id} updated from external file")
+                    else:
+                        # L'utente vuole mantenere la versione locale
+                        # Ignora il prossimo salvataggio per evitare conflitti
+                        self.file_watcher.ignore_next_change(file_path)
+                        
+                        # Salva immediatamente la versione locale per sovrascrivere il file esterno
+                        self._perform_auto_save()
+                        
+                        logger.info(f"Kept local version for note {note_id}, overwriting external file")
+            else:
+                # Se non stiamo visualizzando questa nota, aggiorna silenziosamente il database
+                # Parse il contenuto anche per l'aggiornamento silenzioso
+                update_data = {
+                    'content': parsed_data.get('content', '')
+                }
+                if 'title' in parsed_data:
+                    update_data['title'] = str(parsed_data['title'])
+                if 'jira_key' in parsed_data:
+                    update_data['jira_key'] = str(parsed_data['jira_key'])
+                if 'tags' in parsed_data:
+                    update_data['tags'] = str(parsed_data['tags'])
+                if 'fictitious' in parsed_data:
+                    update_data['is_fictitious'] = bool(parsed_data['fictitious'])
+                
+                self.db_service.update_note(note_id, **update_data)
+                logger.info(f"Silently updated note {note_id} from external file")
+                
+                # Aggiorna la lista se necessario
+                if hasattr(self, 'notes_table'):
+                    self.load_notes()
+            
+        except Exception as e:
+            logger.error(f"Error handling external file change for note {note_id}: {e}")
+            QMessageBox.warning(self, "Errore", f"Errore nel gestire la modifica esterna: {str(e)}")
+
+    def _on_file_deleted_externally(self, note_id: int, file_path: str):
+        """
+        Gestisce quando un file di nota viene eliminato esternamente.
+        
+        Args:
+            note_id: ID della nota il cui file è stato eliminato
+            file_path: Percorso del file eliminato
+        """
+        try:
+            logger.info(f"External deletion detected for note {note_id}: {file_path}")
+            
+            from PyQt6.QtWidgets import QMessageBox
+            
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("File eliminato esternamente")
+            msg.setText(f"Il file della nota è stato eliminato esternamente:")
+            msg.setInformativeText(f"File: {Path(file_path).name}\n\n"
+                                 "Vuoi ricreare il file con il contenuto attuale della nota?")
+            
+            recreate_btn = msg.addButton("Ricrea file", QMessageBox.ButtonRole.AcceptRole)
+            ignore_btn = msg.addButton("Ignora", QMessageBox.ButtonRole.RejectRole)
+            msg.setDefaultButton(recreate_btn)
+            
+            msg.exec()
+            
+            if msg.clickedButton() == recreate_btn:
+                # Riottieni la nota dal database
+                note = self.db_service.get_note_by_id(note_id)
+                if note:
+                    # Ricrea il file
+                    success, file_path = self.fs_manager.save_note_to_file(
+                        note.get('content', ''),
+                        note.get('jira_key', ''),
+                        note.get('title', ''),
+                        note.get('tags', ''),
+                        note.get('is_fictitious', False)
+                    )
+                    
+                    if success:
+                        # Riavvia il monitoraggio del file
+                        self.file_watcher.add_note_to_watch(
+                            note_id,
+                            note.get('jira_key', ''),
+                            note.get('title', ''),
+                            note.get('content', '')
+                        )
+                        
+                        QMessageBox.information(self, "Successo", f"File ricreato: {file_path}")
+                        logger.info(f"Recreated file for note {note_id}: {file_path}")
+                    else:
+                        QMessageBox.warning(self, "Errore", "Errore nella ricreazione del file")
+            
+        except Exception as e:
+            logger.error(f"Error handling external file deletion for note {note_id}: {e}")
+            QMessageBox.warning(self, "Errore", f"Errore nel gestire l'eliminazione esterna: {str(e)}")
+
     def closeEvent(self, event):
         """Handle dialog closing."""
+        try:
+            # Stop file watching when closing
+            if hasattr(self, 'file_watcher'):
+                self.file_watcher.stop_watching_all()
+            
+            # Stop auto-save timer
+            if hasattr(self, 'auto_save_timer'):
+                self.auto_save_timer.stop()
+            
+        except Exception as e:
+            logger.error(f"Error during dialog close: {e}")
+        
         super().closeEvent(event)
+
+    def _show_help_message(self, message):
+        """Mostra un messaggio di aiuto nella status bar o come tooltip."""
+        try:
+            if hasattr(self, 'save_status_label'):
+                self.save_status_label.setText(message)
+                self.save_status_label.setStyleSheet("color: blue; font-size: 11px; font-weight: bold;")
+                # Mostra il messaggio per 5 secondi poi torna normale
+                def reset_style():
+                    if hasattr(self, 'save_status_label'):
+                        self.save_status_label.setStyleSheet("color: gray; font-size: 11px;")
+                QTimer.singleShot(5000, reset_style)
+        except Exception as e:
+            logger.warning(f"Error showing help message: {e}")
+
+    def _setup_search_targets(self):
+        """Configura i target per la ricerca universale."""
+        try:
+            # Aggiungi i widget principali come target di ricerca
+            if hasattr(self, 'notes_table'):
+                self.add_searchable_widget(self.notes_table)
+            
+            if hasattr(self, 'content_edit'):
+                self.add_searchable_widget(self.content_edit)
+                
+            if hasattr(self, 'title_edit'):
+                self.add_searchable_widget(self.title_edit)
+                
+            if hasattr(self, 'jira_key_edit'):
+                self.add_searchable_widget(self.jira_key_edit)
+                
+            if hasattr(self, 'tags_edit'):
+                self.add_searchable_widget(self.tags_edit)
+                
+            logger.debug("Search targets configured for NotesManagerDialog")
+        except Exception as e:
+            logger.warning(f"Error setting up search targets: {e}")
 
     def showEvent(self, event):
         # Don't automatically apply always-on-top to dialog windows
