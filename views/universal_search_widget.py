@@ -61,10 +61,11 @@ class UniversalSearchWidget(QFrame):
         self.setFrameStyle(QFrame.Shape.StyledPanel)
         self.setStyleSheet("""
             UniversalSearchWidget {
-                background-color: #2d2d30;
-                border: 1px solid #3e3e42;
+                background-color: #f0f0f0;
+                border: 2px solid #0078d4;
                 border-radius: 3px;
-                padding: 4px;
+                padding: 6px;
+                min-height: 40px;
             }
         """)
         

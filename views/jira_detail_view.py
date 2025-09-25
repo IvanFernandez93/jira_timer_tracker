@@ -53,9 +53,6 @@ class JiraDetailView(QDialog, SearchableMixin):
 
         main_layout = QVBoxLayout(self)
 
-        # Initialize universal search functionality
-        self.init_search_functionality()
-
         # 1. Header (Req 2.4.1)
         header_layout = QHBoxLayout()
         self.jira_key_label = QLabel(jira_key)
@@ -464,6 +461,15 @@ class JiraDetailView(QDialog, SearchableMixin):
         self.tab_widget.addTab(self.issue_links_tab, "Linked Issues")
 
         self.tab_widget.setCurrentIndex(0) # Default to Details tab
+        
+        # Initialize universal search functionality at the end
+        self.init_search_functionality()
+        
+        # Inserisci il widget di ricerca nel layout principale per JiraDetailView
+        if hasattr(self, 'search_widget'):
+            main_layout = self.layout()
+            if main_layout:
+                main_layout.insertWidget(0, self.search_widget)
         
         # Add search targets for universal search
         self._setup_search_targets()
