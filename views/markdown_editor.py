@@ -495,3 +495,28 @@ class MarkdownEditor(QWidget):
             self.preview_browser.setFocus()
         else:  # Side-by-side
             self.editor_combined.setFocus()  # Focus on editor
+    
+    def setReadOnly(self, readonly: bool):
+        """Set the editor to readonly mode."""
+        if hasattr(self, 'editor'):
+            self.editor.setReadOnly(readonly)
+        if hasattr(self, 'editor_combined'):
+            self.editor_combined.setReadOnly(readonly)
+        
+        # Also disable/enable toolbar if present
+        if hasattr(self, 'toolbar') and self.toolbar:
+            self.toolbar.setEnabled(not readonly)
+    
+    def isReadOnly(self) -> bool:
+        """Check if editor is in readonly mode."""
+        if hasattr(self, 'editor'):
+            return self.editor.isReadOnly()
+        return False
+    
+    def setStyleSheet(self, style: str):
+        """Apply stylesheet to the editor components."""
+        super().setStyleSheet(style)
+        if hasattr(self, 'editor'):
+            self.editor.setStyleSheet(style)
+        if hasattr(self, 'editor_combined'):
+            self.editor_combined.setStyleSheet(style)

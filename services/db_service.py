@@ -143,6 +143,31 @@ class DatabaseService:
                 print("Adding IsFictitious column to Annotations table")
                 cursor.execute("ALTER TABLE Annotations ADD COLUMN IsFictitious INTEGER NOT NULL DEFAULT 0")
             
+            # Add git-based columns for new draft system
+            try:
+                cursor.execute("SELECT IsDraft FROM Annotations LIMIT 1")
+            except sqlite3.OperationalError:
+                print("Adding IsDraft column to Annotations table")
+                cursor.execute("ALTER TABLE Annotations ADD COLUMN IsDraft INTEGER NOT NULL DEFAULT 0")
+                
+            try:
+                cursor.execute("SELECT DraftSavedAt FROM Annotations LIMIT 1")
+            except sqlite3.OperationalError:
+                print("Adding DraftSavedAt column to Annotations table")
+                cursor.execute("ALTER TABLE Annotations ADD COLUMN DraftSavedAt TEXT")
+                
+            try:
+                cursor.execute("SELECT LastCommitHash FROM Annotations LIMIT 1")
+            except sqlite3.OperationalError:
+                print("Adding LastCommitHash column to Annotations table")
+                cursor.execute("ALTER TABLE Annotations ADD COLUMN LastCommitHash TEXT")
+                
+            try:
+                cursor.execute("SELECT GitBranch FROM Annotations LIMIT 1")
+            except sqlite3.OperationalError:
+                print("Adding GitBranch column to Annotations table")
+                cursor.execute("ALTER TABLE Annotations ADD COLUMN GitBranch TEXT DEFAULT 'main'")
+            
             # SyncQueue Table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS SyncQueue (
@@ -342,14 +367,24 @@ class DatabaseService:
 
     # --- Annotation Management ---
 
-    def create_note(self, jira_key: str = None, title: str = "", content: str = "", tags: str = "", is_fictitious: bool = False) -> int:
+    def create_note(self, jira_key: str = None, title: str = "", content: str = "", tags: str = "", is_fictitious: bool = False, is_draft: bool = False) -> int:
         """Creates a new note and returns its ID."""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+            
             cursor.execute(
-                'INSERT INTO Annotations (JiraKey, Title, Content, Tags, IsDeleted, IsFictitious) VALUES (?, ?, ?, ?, 0, ?)',
-                (jira_key, title, content, tags, 1 if is_fictitious else 0)
+                '''INSERT INTO Annotations (JiraKey, Title, Content, Tags, IsDeleted, IsFictitious, IsDraft, 
+                   CreatedAt, UpdatedAt, DraftSavedAt, GitBranch) 
+                   VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'main')''',
+                (jira_key, title, content, tags, 
+                 1 if is_fictitious else 0,
+                 1 if is_draft else 0,
+                 current_time, 
+                 current_time,
+                 current_time if is_draft else None)
             )
             conn.commit()
             return cursor.lastrowid
@@ -362,7 +397,9 @@ class DatabaseService:
         try:
             cursor = conn.cursor()
             cursor.execute(
-                'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations WHERE Id = ?',
+                '''SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, 
+                   IsFictitious, IsDraft, DraftSavedAt, LastCommitHash, GitBranch 
+                   FROM Annotations WHERE Id = ?''',
                 (note_id,)
             )
             row = cursor.fetchone()
@@ -379,12 +416,16 @@ class DatabaseService:
                 'deleted_at': row[6],
                 'created_at': row[7],
                 'updated_at': row[8],
-                'is_fictitious': bool(row[9])
+                'is_fictitious': bool(row[9]),
+                'is_draft': bool(row[10]),
+                'draft_saved_at': row[11],
+                'last_commit_hash': row[12],
+                'git_branch': row[13] or 'main'
             }
         finally:
             conn.close()
 
-    def update_note(self, note_id: int, jira_key: str = None, title: str = None, content: str = None, tags: str = None, is_fictitious: bool = None):
+    def update_note(self, note_id: int, jira_key: str = None, title: str = None, content: str = None, tags: str = None, is_fictitious: bool = None, is_draft: bool = None, commit_hash: str = None):
         """Updates a note with the provided fields."""
         conn = self.get_connection()
         try:
@@ -413,6 +454,14 @@ class DatabaseService:
             if is_fictitious is not None:
                 updates.append('IsFictitious = ?')
                 params.append(is_fictitious)
+                
+            if is_draft is not None:
+                updates.append('IsDraft = ?')
+                params.append(1 if is_draft else 0)
+                
+            if commit_hash is not None:
+                updates.append('LastCommitHash = ?')
+                params.append(commit_hash)
             
             if not updates:
                 return
@@ -423,6 +472,11 @@ class DatabaseService:
             updates.append('UpdatedAt = ?')
             params.append(current_time)
             
+            # If this is a draft save, update DraftSavedAt
+            if is_draft:
+                updates.append('DraftSavedAt = ?')
+                params.append(current_time)
+            
             # Add note_id to params
             params.append(note_id)
             
@@ -430,6 +484,57 @@ class DatabaseService:
             query = f"UPDATE Annotations SET {', '.join(updates)} WHERE Id = ?"
             cursor.execute(query, params)
             conn.commit()
+        finally:
+            conn.close()
+
+    def save_note_as_draft(self, jira_key: str = None, title: str = None, content: str = "", tags: str = "", note_id: int = None, is_fictitious: bool = False) -> int:
+        """Save a note as draft. Creates new note if note_id is None, updates existing otherwise."""
+        try:
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+            
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            if note_id is None:
+                # Create new note as draft
+                cursor.execute(
+                    '''INSERT INTO Annotations (JiraKey, Title, Content, Tags, IsFictitious, IsDraft, DraftSavedAt, CreatedAt, UpdatedAt) 
+                       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)''',
+                    (jira_key, title, content, tags, is_fictitious, current_time, current_time, current_time)
+                )
+                note_id = cursor.lastrowid
+            else:
+                # Update existing note as draft
+                cursor.execute(
+                    'UPDATE Annotations SET Content = ?, Tags = ?, IsFictitious = ?, IsDraft = 1, DraftSavedAt = ?, UpdatedAt = ? WHERE Id = ?',
+                    (content, tags, is_fictitious, current_time, current_time, note_id)
+                )
+            
+            conn.commit()
+            return note_id
+        except Exception as e:
+            print(f"Error saving note as draft: {e}")
+            return None
+        finally:
+            conn.close()
+            
+    def commit_note(self, note_id: int, commit_hash: str) -> bool:
+        """Mark a note as committed (not draft) and save commit hash."""
+        try:
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+            
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE Annotations SET IsDraft = 0, LastCommitHash = ?, UpdatedAt = ?, DraftSavedAt = NULL WHERE Id = ?',
+                (commit_hash, current_time, note_id)
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            return False
         finally:
             conn.close()
 
@@ -481,11 +586,15 @@ class DatabaseService:
             cursor = conn.cursor()
             if include_deleted:
                 cursor.execute(
-                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations ORDER BY UpdatedAt DESC'
+                    '''SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, 
+                       IsFictitious, IsDraft, DraftSavedAt, LastCommitHash, GitBranch 
+                       FROM Annotations ORDER BY UpdatedAt DESC'''
                 )
             else:
                 cursor.execute(
-                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations WHERE IsDeleted = 0 ORDER BY UpdatedAt DESC'
+                    '''SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, 
+                       IsFictitious, IsDraft, DraftSavedAt, LastCommitHash, GitBranch 
+                       FROM Annotations WHERE IsDeleted = 0 ORDER BY UpdatedAt DESC'''
                 )
             
             notes = []
@@ -500,7 +609,11 @@ class DatabaseService:
                     'deleted_at': row[6],
                     'created_at': row[7],
                     'updated_at': row[8],
-                    'is_fictitious': bool(row[9])
+                    'is_fictitious': bool(row[9]),
+                    'is_draft': bool(row[10]),
+                    'draft_saved_at': row[11],
+                    'last_commit_hash': row[12],
+                    'git_branch': row[13] or 'main'
                 })
             return notes
         finally:
@@ -513,7 +626,8 @@ class DatabaseService:
             cursor = conn.cursor()
             if include_deleted:
                 cursor.execute(
-                    '''SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious 
+                    '''SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, 
+                       IsFictitious, IsDraft, DraftSavedAt, LastCommitHash, GitBranch 
                        FROM Annotations 
                        WHERE JiraKey = ? AND Title NOT LIKE 'Auto:%' 
                        ORDER BY UpdatedAt DESC''',
@@ -521,7 +635,8 @@ class DatabaseService:
                 )
             else:
                 cursor.execute(
-                    '''SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious 
+                    '''SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, 
+                       IsFictitious, IsDraft, DraftSavedAt, LastCommitHash, GitBranch 
                        FROM Annotations 
                        WHERE JiraKey = ? AND IsDeleted = 0 AND Title NOT LIKE 'Auto:%' 
                        ORDER BY UpdatedAt DESC''',
@@ -540,7 +655,11 @@ class DatabaseService:
                     'deleted_at': row[6],
                     'created_at': row[7],
                     'updated_at': row[8],
-                    'is_fictitious': bool(row[9])
+                    'is_fictitious': bool(row[9]),
+                    'is_draft': bool(row[10]),
+                    'draft_saved_at': row[11],
+                    'last_commit_hash': row[12],
+                    'git_branch': row[13] or 'main'
                 })
             return notes
         finally:
@@ -563,9 +682,13 @@ class DatabaseService:
             tag_filter = ' OR '.join(tag_conditions)
             
             if include_deleted:
-                query = f'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations WHERE ({tag_filter}) ORDER BY UpdatedAt DESC'
+                query = f'''SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, 
+                           IsFictitious, IsDraft, DraftSavedAt, LastCommitHash, GitBranch 
+                           FROM Annotations WHERE ({tag_filter}) ORDER BY UpdatedAt DESC'''
             else:
-                query = f'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations WHERE ({tag_filter}) AND IsDeleted = 0 ORDER BY UpdatedAt DESC'
+                query = f'''SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, 
+                           IsFictitious, IsDraft, DraftSavedAt, LastCommitHash, GitBranch 
+                           FROM Annotations WHERE ({tag_filter}) AND IsDeleted = 0 ORDER BY UpdatedAt DESC'''
             
             cursor.execute(query, params)
             
@@ -581,7 +704,11 @@ class DatabaseService:
                     'deleted_at': row[6],
                     'created_at': row[7],
                     'updated_at': row[8],
-                    'is_fictitious': bool(row[9])
+                    'is_fictitious': bool(row[9]),
+                    'is_draft': bool(row[10]),
+                    'draft_saved_at': row[11],
+                    'last_commit_hash': row[12],
+                    'git_branch': row[13] or 'main'
                 })
             return notes
         finally:
@@ -597,12 +724,16 @@ class DatabaseService:
             
             if include_deleted:
                 cursor.execute(
-                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations WHERE (Title LIKE ? OR Content LIKE ? OR JiraKey LIKE ?) ORDER BY UpdatedAt DESC',
+                    '''SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, 
+                       IsFictitious, IsDraft, DraftSavedAt, LastCommitHash, GitBranch 
+                       FROM Annotations WHERE (Title LIKE ? OR Content LIKE ? OR JiraKey LIKE ?) ORDER BY UpdatedAt DESC''',
                     (search_pattern, search_pattern, search_pattern)
                 )
             else:
                 cursor.execute(
-                    'SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, IsFictitious FROM Annotations WHERE (Title LIKE ? OR Content LIKE ? OR JiraKey LIKE ?) AND IsDeleted = 0 ORDER BY UpdatedAt DESC',
+                    '''SELECT Id, JiraKey, Title, Content, Tags, IsDeleted, DeletedAt, CreatedAt, UpdatedAt, 
+                       IsFictitious, IsDraft, DraftSavedAt, LastCommitHash, GitBranch 
+                       FROM Annotations WHERE (Title LIKE ? OR Content LIKE ? OR JiraKey LIKE ?) AND IsDeleted = 0 ORDER BY UpdatedAt DESC''',
                     (search_pattern, search_pattern, search_pattern)
                 )
             
@@ -618,7 +749,11 @@ class DatabaseService:
                     'deleted_at': row[6],
                     'created_at': row[7],
                     'updated_at': row[8],
-                    'is_fictitious': bool(row[9])
+                    'is_fictitious': bool(row[9]),
+                    'is_draft': bool(row[10]),
+                    'draft_saved_at': row[11],
+                    'last_commit_hash': row[12],
+                    'git_branch': row[13] or 'main'
                 })
             return notes
         finally:
@@ -1640,6 +1775,45 @@ class DatabaseService:
                     'status': row[2] or 'Unknown',
                     'priority': row[3] or 'Unknown',
                     'updated_at': row[4]
+                })
+            return issues
+        finally:
+            conn.close()
+            
+    def get_recent_issues(self, limit: int = 20) -> list:
+        """Gets recently viewed or cached issues for startup display.
+        
+        Combines cached issues with view history to provide immediate data during startup.
+        Prioritizes recently viewed issues and fills with other cached issues.
+        """
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Get issues ordered by recent view history first, then by cache update time
+            cursor.execute("""
+                SELECT DISTINCT 
+                    c.JiraKey, 
+                    c.Summary, 
+                    c.Status, 
+                    c.Priority, 
+                    c.UpdatedAt,
+                    COALESCE(v.LastViewedAt, c.UpdatedAt) as SortDate
+                FROM JiraIssueCache c
+                LEFT JOIN ViewHistory v ON c.JiraKey = v.JiraKey
+                ORDER BY SortDate DESC
+                LIMIT ?
+            """, (limit,))
+            
+            issues = []
+            for row in cursor.fetchall():
+                issues.append({
+                    'key': row[0],
+                    'summary': row[1] or f"{row[0]} (dati offline)",
+                    'status': row[2] or 'Unknown', 
+                    'priority': row[3] or 'Unknown',
+                    'updated_at': row[4],
+                    'last_viewed': row[5]
                 })
             return issues
         finally:

@@ -12,9 +12,14 @@ from qfluentwidgets import (
     ToolButton, ComboBox
 )
 from datetime import datetime
+from typing import Dict, Optional
 import json
+import logging
 
 from views.markdown_editor import MarkdownEditor
+from services.note_manager import NoteManager, NoteData, NoteState
+
+logger = logging.getLogger(__name__)
 
 class SortableTableItem(QTableWidgetItem):
     """Item personalizzato per il QTableWidget che supporta l'ordinamento corretto dei tipi di dati."""
@@ -42,8 +47,25 @@ class NotesManagerDialog(QDialog):
         self.db_service = db_service
         self.app_settings = app_settings
         self.jira_service = jira_service
+        
+        # Initialize advanced note management system
+        from services.git_service import GitService
+        self.git_service = GitService()
+        self.note_manager = NoteManager(self.db_service, self.git_service)
+        
+        # Current state tracking
         self.current_note_id = None
+        self.current_note_state: Optional[NoteState] = None
         self.show_deleted = False
+        
+        # Connect note manager signals
+        self.note_manager.note_state_changed.connect(self._on_note_state_changed)
+        self.note_manager.note_saved.connect(self._on_note_saved)
+        self.note_manager.note_error.connect(self._on_note_error)
+        
+        # Performance optimization: content change detection
+        self._last_content_hash = None
+        self._content_changed = False
 
         self.setWindowTitle("Gestione Note")
         # Use non-destructive method to add maximize button
@@ -180,14 +202,50 @@ class NotesManagerDialog(QDialog):
         self.content_edit = MarkdownEditor(show_toolbar=True)
         self.content_edit.setPlaceholderText("Contenuto della nota (Markdown supportato)...")
         self.content_edit.setMinimumHeight(200)
+        
+        # Connect to optimized change detection
+        self.content_edit.textChanged.connect(self._on_content_changed_optimized)
+        
         self.editor_header_layout.addWidget(self.content_edit)
+
+        # Status information layout
+        self.status_layout = QHBoxLayout()
+        
+        # Draft status label
+        self.draft_status_label = QLabel("📝 BOZZA")
+        self.draft_status_label.setStyleSheet("QLabel { color: orange; font-weight: bold; }")
+        self.status_layout.addWidget(self.draft_status_label)
+        
+        # Commit status label  
+        self.commit_status_label = QLabel("Nuova bozza")
+        self.commit_status_label.setStyleSheet("QLabel { color: gray; }")
+        self.status_layout.addWidget(self.commit_status_label)
+        
+        # Save status labels
+        self.save_status_label = QLabel("Mai salvato")
+        self.save_status_label.setStyleSheet("color: gray; font-size: 11px;")
+        self.status_layout.addWidget(self.save_status_label)
+        
+        self.draft_status_label = QLabel("")
+        self.draft_status_label.setStyleSheet("color: orange; font-size: 11px;")
+        self.status_layout.addWidget(self.draft_status_label)
+        
+        self.status_layout.addStretch()
+        
+        self.editor_header_layout.addLayout(self.status_layout)
 
         # Action buttons
         self.actions_layout = QHBoxLayout()
 
-        self.save_btn = PrimaryPushButton("Salva")
+        self.save_btn = PrimaryPushButton("Salva bozza")
         self.save_btn.setIcon(FIF.SAVE)
         self.save_btn.setEnabled(False)
+        self.save_btn.setToolTip("Salva come bozza (modificabile)")
+
+        self.commit_btn = PushButton("Commit")
+        self.commit_btn.setIcon(FIF.ACCEPT)
+        self.commit_btn.setEnabled(False)
+        self.commit_btn.setToolTip("Commit definitivo (readonly)")
 
         self.delete_btn = PushButton("Elimina")
         self.delete_btn.setIcon(FIF.DELETE)
@@ -199,6 +257,7 @@ class NotesManagerDialog(QDialog):
         self.restore_btn.setVisible(False)
 
         self.actions_layout.addWidget(self.save_btn)
+        self.actions_layout.addWidget(self.commit_btn)
         self.actions_layout.addWidget(self.delete_btn)
         self.actions_layout.addWidget(self.restore_btn)
         self.actions_layout.addStretch()
@@ -233,7 +292,8 @@ class NotesManagerDialog(QDialog):
         self.show_deleted_cb.toggled.connect(self.on_show_deleted_toggled)
         self.notes_table.itemSelectionChanged.connect(self.on_note_selected)
         self.notes_table.doubleClicked.connect(self._on_table_double_clicked)
-        self.save_btn.clicked.connect(self.save_note)
+        self.save_btn.clicked.connect(self._handle_save_action)
+        self.commit_btn.clicked.connect(self._handle_commit_action)
         self.delete_btn.clicked.connect(self.delete_note)
         self.restore_btn.clicked.connect(self.restore_note)
         self.title_edit.textChanged.connect(self.on_content_changed)
@@ -399,21 +459,39 @@ class NotesManagerDialog(QDialog):
             self.load_note_in_editor(note_id)
 
     def load_note_in_editor(self, note_id):
-        """Load a note into the editor."""
+        """Load a note into the editor using optimized note manager."""
         try:
-            note = self.db_service.get_note_by_id(note_id)
-            if not note:
+            # Stop any ongoing auto-save
+            self.note_manager.stop_auto_save()
+            
+            # Use note manager to load note with state management
+            success, note, state = self.note_manager.load_note(note_id)
+            
+            if not success or not note or not state:
+                logger.warning(f"Failed to load note {note_id}")
                 return
 
+            # Update UI with note data
             self.current_note_id = note_id
-            self.jira_key_edit.setText(note['jira_key'] or "")
-            has_jira = bool(note['jira_key'])
-            self.open_jira_btn.setEnabled(has_jira)  # Abilita il pulsante se c'è una chiave Jira
-            self.start_timer_btn.setEnabled(has_jira)  # Abilita il pulsante del timer se c'è una chiave Jira
-            self.title_edit.setText(note['title'])
-            self.tags_edit.setText(note['tags'])
+            self.jira_key_edit.setText(note.get('jira_key', ''))
+            self.title_edit.setText(note.get('title', ''))
+            self.tags_edit.setText(note.get('tags', ''))
             self.fictitious_cb.setChecked(note.get('is_fictitious', False))
-            self.content_edit.setMarkdown(note['content'])
+            
+            # Set content and calculate hash for change detection
+            content = note.get('content', '')
+            self.content_edit.setMarkdown(content)
+            self._last_content_hash = hash(content)
+            self._content_changed = False
+
+            # Update JIRA-related button states
+            has_jira = bool(note.get('jira_key'))
+            self.open_jira_btn.setEnabled(has_jira)
+            self.start_timer_btn.setEnabled(has_jira)
+            
+            # State is automatically handled by note manager callbacks
+            # Update status and info labels
+            self._update_status_labels(note)
 
             # Update info label
             try:
@@ -460,23 +538,25 @@ class NotesManagerDialog(QDialog):
             is_fictitious = self.fictitious_cb.isChecked()
 
             if self.current_note_id:
-                # Update existing note
+                # Update existing note as draft
                 self.db_service.update_note(
                     self.current_note_id,
                     jira_key=jira_key,
                     title=title,
                     content=content,
                     tags=tags,
-                    is_fictitious=is_fictitious
+                    is_fictitious=is_fictitious,
+                    is_draft=True
                 )
             else:
-                # Create new note
+                # Create new note as draft
                 self.current_note_id = self.db_service.create_note(
                     jira_key=jira_key,
                     title=title,
                     content=content,
                     tags=tags,
-                    is_fictitious=is_fictitious
+                    is_fictitious=is_fictitious,
+                    is_draft=True
                 )
 
             # If jira_service is available and this is a jira key that's marked as fictitious,
@@ -504,6 +584,441 @@ class NotesManagerDialog(QDialog):
 
         except Exception as e:
             QMessageBox.warning(self, "Errore", f"Errore nel salvataggio della nota: {str(e)}")
+
+    def _on_content_changed_optimized(self):
+        """Optimized content change handler with hash-based detection."""
+        if not self.current_note_state or self.current_note_state.state_name == 'committed':
+            return
+            
+        # Calculate content hash to detect actual changes
+        current_content = self.content_edit.toPlainText()
+        current_hash = hash(current_content)
+        
+        if current_hash != self._last_content_hash:
+            self._last_content_hash = current_hash
+            self._content_changed = True
+            
+            # Start auto-save for draft notes
+            if self.current_note_state.state_name == 'draft':
+                self.note_manager.start_auto_save()
+                self._update_draft_status_label("Modifiche in corso...")
+    
+    def _handle_save_action(self):
+        """Handle save button click using advanced note manager."""
+        try:
+            if not self.current_note_state:
+                # Create new note
+                note_data = self._collect_note_data()
+                if note_data:
+                    success, note_id, state = self.note_manager.create_new_note(note_data)
+                    if success:
+                        self.current_note_id = note_id
+                        self._refresh_notes_list()
+                        self._select_note_by_id(note_id)
+                return
+            
+            if self.current_note_state.state_name == 'committed':
+                # Convert to draft for editing
+                success = self.note_manager.convert_to_draft(self.current_note_id)
+                if success:
+                    self._refresh_notes_list()
+            elif self.current_note_state.state_name in ['draft', 'new']:
+                # Save as draft
+                note_data = self._collect_note_data()
+                if note_data:
+                    success = self.note_manager.save_draft(self.current_note_id, note_data)
+                    if success:
+                        self._refresh_notes_list()
+                        
+        except Exception as e:
+            logger.error(f"Save action failed: {e}")
+            QMessageBox.warning(self, "Errore", f"Errore durante il salvataggio: {e}")
+
+    def _collect_note_data(self) -> Optional[NoteData]:
+        """Collect note data from UI fields with validation."""
+        try:
+            jira_key = self.jira_key_edit.text().strip() or 'GENERAL'
+            title = self.title_edit.text().strip()
+            content = self.content_edit.toMarkdown()
+            tags = self.tags_edit.text().strip()
+            is_fictitious = self.fictitious_cb.isChecked()
+            
+            if not title:
+                QMessageBox.warning(self, "Errore", "Il titolo è obbligatorio")
+                return None
+                
+            return NoteData(
+                jira_key=jira_key,
+                title=title,
+                content=content,
+                tags=tags,
+                is_fictitious=is_fictitious
+            )
+            
+        except Exception as e:
+            logger.error(f"Error collecting note data: {e}")
+            QMessageBox.warning(self, "Errore", f"Errore nei dati: {e}")
+            return None
+    
+    def _on_note_state_changed(self, state: NoteState):
+        """Handle note state changes from the note manager."""
+        self.current_note_state = state
+        self._update_ui_for_state(state)
+        
+    def _on_note_saved(self, note_id: int, message: str):
+        """Handle successful note save."""
+        self._update_draft_status_label(f"✓ {message}")
+        self._refresh_notes_list()
+        
+    def _on_note_error(self, error_message: str):
+        """Handle note management errors."""
+        QMessageBox.warning(self, "Errore", error_message)
+        
+    def _update_ui_for_state(self, state: NoteState):
+        """Update UI elements based on note state."""
+        if state.state_name == 'committed':
+            self.content_edit.setReadOnly(True)
+            self.title_edit.setReadOnly(True)
+            self.jira_key_edit.setReadOnly(True)
+            self.tags_edit.setReadOnly(True)
+            self.fictitious_cb.setEnabled(False)
+            self._update_draft_status_label("📋 COMMITTATA")
+            
+        elif state.state_name == 'draft':
+            self.content_edit.setReadOnly(False)
+            self.title_edit.setReadOnly(False)
+            self.jira_key_edit.setReadOnly(False)
+            self.tags_edit.setReadOnly(False)
+            self.fictitious_cb.setEnabled(True)
+            self._update_draft_status_label("📝 BOZZA")
+            
+        else:  # new
+            self.content_edit.setReadOnly(False)
+            self.title_edit.setReadOnly(False)
+            self.jira_key_edit.setReadOnly(False)
+            self.tags_edit.setReadOnly(False)
+            self.fictitious_cb.setEnabled(True)
+            self._update_draft_status_label("✨ NUOVA")
+            now = datetime.now().strftime("%H:%M:%S")
+            self._update_draft_status_label(f"💾 Bozza salvata alle {now}")
+                
+        except Exception as e:
+            QMessageBox.warning(self, "Errore", f"Errore nel salvare la bozza: {e}")
+
+    def _convert_to_draft(self):
+        """Convert a committed note back to draft mode for editing."""
+        if not self.current_note_id:
+            return
+            
+        reply = QMessageBox.question(
+            self, 
+            "Modifica Nota",
+            "Convertire la nota in bozza per modificarla?\n"
+            "La nota tornerà in modalità editing e dovrà essere ri-committata.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                # Convert to draft in database
+                from datetime import datetime, timezone
+                current_time = datetime.now(timezone.utc).isoformat()
+                
+                conn = self.db_service.get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    'UPDATE Annotations SET IsDraft = 1, DraftSavedAt = ?, UpdatedAt = ? WHERE Id = ?',
+                    (current_time, current_time, self.current_note_id)
+                )
+                conn.commit()
+                conn.close()
+                
+                # Refresh UI
+                self.load_note_in_editor(self.current_note_id)
+                
+            except Exception as e:
+                QMessageBox.warning(self, "Errore", f"Errore nella conversione: {e}")
+    
+    def _handle_commit_action(self):
+        """Handle commit button click using advanced note manager."""
+        try:
+            if not self.current_note_state:
+                return
+                
+            if self.current_note_state.state_name == 'committed':
+                # Show git history
+                self._show_git_history()
+            elif self.current_note_state.state_name == 'draft':
+                # Commit the note
+                self._commit_note_advanced()
+                
+        except Exception as e:
+            logger.error(f"Commit action failed: {e}")
+            QMessageBox.warning(self, "Errore", f"Errore durante il commit: {e}")
+
+    def _commit_note_advanced(self):
+        """Commit current note using advanced note manager."""
+        try:
+            if not self.current_note_id:
+                return
+                
+            # Save any pending changes first
+            if self._content_changed:
+                note_data = self._collect_note_data()
+                if note_data:
+                    success = self.note_manager.save_draft(self.current_note_id, note_data)
+                    if not success:
+                        return
+                        
+            # Get commit message from user
+            from PyQt6.QtWidgets import QInputDialog
+            commit_message, ok = QInputDialog.getText(
+                self, 
+                "Commit Note", 
+                "Inserisci il messaggio di commit:",
+                text="Update note content"
+            )
+            
+            if not ok or not commit_message.strip():
+                return
+                
+            # Use note manager to commit
+            success = self.note_manager.commit_note(self.current_note_id, commit_message.strip())
+            
+            if success:
+                self._refresh_notes_list()
+                
+        except Exception as e:
+            logger.error(f"Advanced commit failed: {e}")
+            QMessageBox.warning(self, "Errore", f"Errore nel commit: {e}")
+                
+            # Save current state as draft first
+            self._save_draft()
+            
+            # Get note data
+            note = self.db_service.get_note_by_id(self.current_note_id)
+            if not note:
+                return
+            
+            # Prepare metadata for git
+            metadata = {
+                'jira_key': note['jira_key'],
+                'title': note['title'],
+                'tags': note['tags'],
+                'created_at': note['created_at'],
+                'is_fictitious': note['is_fictitious']
+            }
+            
+            # Commit to git
+            commit_hash = self.git_service.commit_note(
+                note['jira_key'] or 'GENERAL',
+                note['title'],
+                note['content'],
+                metadata,
+                commit_message
+            )
+            
+            if commit_hash:
+                # Mark as committed in database
+                self.db_service.commit_note(self.current_note_id, commit_hash)
+                
+                # Refresh the note display
+                self.load_note_in_editor(self.current_note_id)
+                QMessageBox.information(self, "Successo", f"Nota committata con successo!\nHash: {commit_hash[:8]}")
+            else:
+                QMessageBox.warning(self, "Errore", "Errore nel committare la nota")
+                
+        except Exception as e:
+            QMessageBox.warning(self, "Errore", f"Errore nel commit: {e}")
+            
+    def _show_git_history(self):
+        """Show git history for the current note."""
+        if not self.current_note_id:
+            return
+            
+        try:
+            note = self.db_service.get_note_by_id(self.current_note_id)
+            if not note or not note['jira_key'] or not note['title']:
+                QMessageBox.information(self, "Info", "Nessuna storia git disponibile per questa nota")
+                return
+                
+            history = self.git_service.get_note_history(note['jira_key'], note['title'])
+            
+            if not history:
+                QMessageBox.information(self, "Info", "Nessuna storia git trovata per questa nota")
+                return
+                
+            # Create history dialog
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextEdit
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Storia Git: {note['title']}")
+            dialog.resize(600, 400)
+            
+            layout = QVBoxLayout(dialog)
+            text_edit = QTextEdit()
+            text_edit.setReadOnly(True)
+            
+            # Format history
+            history_text = f"📚 Storia Git per '{note['title']}'\n"
+            history_text += "=" * 50 + "\n\n"
+            
+            for i, entry in enumerate(history):
+                history_text += f"🔸 Commit {i+1}: {entry['hash'][:8]}\n"
+                history_text += f"📅 Data: {entry['date']}\n" 
+                history_text += f"💬 Messaggio: {entry['message']}\n"
+                history_text += "-" * 40 + "\n\n"
+                
+            text_edit.setPlainText(history_text)
+            layout.addWidget(text_edit)
+            
+            dialog.exec()
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Errore", f"Errore nel visualizzare la storia: {e}")
+    
+    def _update_save_status_label(self, text: str):
+        """Update the save status label."""
+        self.save_status_label.setText(text)
+    
+    def _update_draft_status_label(self, text: str):
+        """Update the draft status label."""
+        self.draft_status_label.setText(text)
+        
+    def _set_note_editing_mode(self, note_state: str):
+        """
+        Set note editing mode based on state: 'draft', 'committed', 'new'
+        
+        DRAFT MODE: 🟠 Editable content, Save Draft + Commit available
+        COMMITTED MODE: 🟢 Readonly content, Edit + Commit + Delete available  
+        NEW MODE: 🆕 Editable content, Save Draft available
+        """
+        self.current_note_state = note_state
+        
+        if note_state == 'draft':
+            # DRAFT: Content editable, can save draft or commit
+            self.content_edit.setReadOnly(False)
+            self.jira_key_edit.setReadOnly(False)
+            self.title_edit.setReadOnly(False) 
+            self.tags_edit.setReadOnly(False)
+            
+            # Button visibility
+            self.save_btn.setVisible(True)
+            self.save_btn.setText("💾 Salva Bozza")
+            self.save_btn.setToolTip("Salva modifiche come bozza")
+            
+            self.commit_btn.setVisible(True)
+            self.commit_btn.setText("✅ Commit")
+            self.commit_btn.setToolTip("Committa la nota (readonly)")
+            
+            self.delete_btn.setVisible(True)
+            self.delete_btn.setEnabled(True)
+            
+            # UI styling - normal editing
+            self._apply_editing_styles(False)
+            
+        elif note_state == 'committed':
+            # COMMITTED: Readonly content, can edit or delete
+            self.content_edit.setReadOnly(True)
+            self.jira_key_edit.setReadOnly(True) 
+            self.title_edit.setReadOnly(True)
+            self.tags_edit.setReadOnly(True)
+            
+            # Button visibility - special committed mode
+            self.save_btn.setVisible(True)
+            self.save_btn.setText("✏️ Modifica")  
+            self.save_btn.setToolTip("Converti in bozza per modificare")
+            
+            self.commit_btn.setVisible(True)
+            self.commit_btn.setText("📊 Storia") 
+            self.commit_btn.setToolTip("Visualizza cronologia git")
+            
+            self.delete_btn.setVisible(True)
+            self.delete_btn.setEnabled(True)
+            
+            # UI styling - readonly
+            self._apply_editing_styles(True)
+            
+        elif note_state == 'new':
+            # NEW: Content editable, only save as draft available
+            self.content_edit.setReadOnly(False)
+            self.jira_key_edit.setReadOnly(False)
+            self.title_edit.setReadOnly(False)
+            self.tags_edit.setReadOnly(False)
+            
+            # Button visibility
+            self.save_btn.setVisible(True)
+            self.save_btn.setText("💾 Salva Bozza")
+            self.save_btn.setToolTip("Salva nuova nota come bozza")
+            
+            self.commit_btn.setVisible(False)  # No commit until saved as draft
+            self.delete_btn.setVisible(False)  # No delete for unsaved notes
+            
+            # UI styling - normal editing
+            self._apply_editing_styles(False)
+        
+        # Fictitious checkbox always remains editable (per requirements)
+        self.fictitious_cb.setEnabled(True)
+        
+    def _apply_editing_styles(self, readonly: bool):
+        """Apply visual styling based on editing mode."""
+        if readonly:
+            # Subtle readonly styling
+            self.title_edit.setStyleSheet("QLineEdit { background-color: #f8f9fa; border: 1px solid #dee2e6; }")
+            self.tags_edit.setStyleSheet("QLineEdit { background-color: #f8f9fa; border: 1px solid #dee2e6; }")
+            self.content_edit.setStyleSheet("QTextEdit { background-color: #f8f9fa; border: 1px solid #dee2e6; }")
+        else:
+            # Normal editing styling
+            self.title_edit.setStyleSheet("QLineEdit { background-color: white; border: 1px solid #ced4da; }")
+            self.tags_edit.setStyleSheet("QLineEdit { background-color: white; border: 1px solid #ced4da; }")  
+            self.content_edit.setStyleSheet("QTextEdit { background-color: white; border: 1px solid #ced4da; }")
+
+    def _update_status_labels(self, note: Dict):
+        """Update status labels with draft and commit information."""
+        is_draft = note.get('is_draft', False)
+        
+        if is_draft:
+            self.draft_status_label.setText("📝 BOZZA")
+            self.draft_status_label.setStyleSheet("QLabel { color: orange; font-weight: bold; }")
+            
+            # Show draft saved time
+            draft_saved_at = note.get('draft_saved_at')
+            if draft_saved_at:
+                try:
+                    draft_dt = datetime.fromisoformat(draft_saved_at.replace('Z', '+00:00')).astimezone()
+                    draft_str = draft_dt.strftime("%d/%m/%Y %H:%M:%S")
+                    self.commit_status_label.setText(f"Bozza salvata: {draft_str}")
+                    self.commit_status_label.setStyleSheet("QLabel { color: gray; }")
+                except:
+                    self.commit_status_label.setText("Bozza salvata: sconosciuto")
+                    self.commit_status_label.setStyleSheet("QLabel { color: gray; }")
+            else:
+                self.commit_status_label.setText("Nuova bozza")
+                self.commit_status_label.setStyleSheet("QLabel { color: gray; }")
+        else:
+            self.draft_status_label.setText("✓ COMMITTATO")
+            self.draft_status_label.setStyleSheet("QLabel { color: green; font-weight: bold; }")
+            
+            # Show last commit info
+            last_commit_hash = note.get('last_commit_hash')
+            if last_commit_hash:
+                try:
+                    # Get commit date from git
+                    commit_date = self.git_service.get_commit_date(last_commit_hash)
+                    if commit_date:
+                        commit_dt = datetime.fromisoformat(commit_date).astimezone()
+                        commit_str = commit_dt.strftime("%d/%m/%Y %H:%M:%S")
+                        short_hash = last_commit_hash[:8]
+                        self.commit_status_label.setText(f"Ultimo commit: {commit_str} ({short_hash})")
+                        self.commit_status_label.setStyleSheet("QLabel { color: green; }")
+                    else:
+                        self.commit_status_label.setText(f"Commit: {last_commit_hash[:8]}")
+                        self.commit_status_label.setStyleSheet("QLabel { color: green; }")
+                except:
+                    self.commit_status_label.setText("Commit: sconosciuto")
+                    self.commit_status_label.setStyleSheet("QLabel { color: green; }")
+            else:
+                self.commit_status_label.setText("Nessun commit")
+                self.commit_status_label.setStyleSheet("QLabel { color: gray; }")
 
     def delete_note(self):
         """Soft delete the current note."""

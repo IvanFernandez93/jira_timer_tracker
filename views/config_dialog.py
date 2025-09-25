@@ -15,6 +15,17 @@ class ConfigDialog(QDialog):
         self.setWindowTitle("Impostazioni")
         self.resize(600, 500)  # Make the dialog larger
         
+        # Initialize app settings
+        try:
+            from services.app_settings import AppSettings
+            from services.db_service import DatabaseService
+            db_service = DatabaseService()
+            db_service.initialize_db()  # Ensure database is initialized
+            self.app_settings = AppSettings(db_service)
+        except (ImportError, Exception) as e:
+            print(f"Warning: Could not initialize AppSettings: {e}")
+            self.app_settings = None
+        
         # Initialize notification colors
         self._unread_color = "#FF6B6B"  # Default red
         self._read_color = "#FFD93D"    # Default yellow
@@ -720,7 +731,11 @@ class ConfigDialog(QDialog):
         draft_layout.addWidget(BodyLabel("Salvataggio bozze (secondi):"))
         self.draft_autosave_spinbox = QSpinBox()
         self.draft_autosave_spinbox.setRange(1, 300)  # 1 second to 5 minutes
-        self.draft_autosave_spinbox.setValue(self.app_settings.get_autosave_draft_interval() // 1000)
+        # Set default value or get from app_settings
+        if self.app_settings:
+            self.draft_autosave_spinbox.setValue(self.app_settings.get_autosave_draft_interval() // 1000)
+        else:
+            self.draft_autosave_spinbox.setValue(5)  # Default 5 seconds
         self.draft_autosave_spinbox.setToolTip("Frequenza di salvataggio delle bozze (backup temporaneo)")
         draft_layout.addWidget(self.draft_autosave_spinbox)
         draft_layout.addWidget(BodyLabel("sec"))
@@ -732,7 +747,11 @@ class ConfigDialog(QDialog):
         full_layout.addWidget(BodyLabel("Salvataggio definitivo (secondi):"))
         self.full_autosave_spinbox = QSpinBox()
         self.full_autosave_spinbox.setRange(5, 600)  # 5 seconds to 10 minutes
-        self.full_autosave_spinbox.setValue(self.app_settings.get_autosave_full_interval() // 1000)
+        # Set default value or get from app_settings
+        if self.app_settings:
+            self.full_autosave_spinbox.setValue(self.app_settings.get_autosave_full_interval() // 1000)
+        else:
+            self.full_autosave_spinbox.setValue(30)  # Default 30 seconds
         self.full_autosave_spinbox.setToolTip("Frequenza di salvataggio definitivo nel database")
         full_layout.addWidget(self.full_autosave_spinbox)
         full_layout.addWidget(BodyLabel("sec"))
@@ -744,7 +763,11 @@ class ConfigDialog(QDialog):
         indicator_layout.addWidget(BodyLabel("Durata indicatore salvataggio (secondi):"))
         self.save_indicator_spinbox = QSpinBox()
         self.save_indicator_spinbox.setRange(1, 10)  # 1 to 10 seconds
-        self.save_indicator_spinbox.setValue(self.app_settings.get_save_indicator_duration() // 1000)
+        # Set default value or get from app_settings
+        if self.app_settings:
+            self.save_indicator_spinbox.setValue(self.app_settings.get_save_indicator_duration() // 1000)
+        else:
+            self.save_indicator_spinbox.setValue(2)  # Default 2 seconds
         self.save_indicator_spinbox.setToolTip("Durata della visualizzazione del checkmark ✓ nel tab")
         indicator_layout.addWidget(self.save_indicator_spinbox)
         indicator_layout.addWidget(BodyLabel("sec"))

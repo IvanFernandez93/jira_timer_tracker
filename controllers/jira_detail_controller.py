@@ -422,7 +422,7 @@ class JiraDetailController(QObject):
         self._max_concurrent_downloads = 3
         
         self._connect_signals()
-        self._setup_autosave_timer()  # Setup the timer once
+        # Removed autosave timer - now using git-based system
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_display)
@@ -1146,31 +1146,12 @@ class JiraDetailController(QObject):
             
     def _save_current_note(self):
         """Save the currently active note to the DB safely.
-
-        Supports both MarkdownEditor and QTextEdit. Uses the
-        controller's db_service.save_annotation API.
+        
+        DISABLED: Replaced by git-based draft system in Notes Manager.
+        This method is now a no-op to prevent automatic note creation.
         """
-        try:
-            if not self._active_note_editor or not self._current_note_title:
-                return
-
-            content = self._get_note_content()
-            if content:
-                # Persist to DB
-                self.db_service.save_annotation(self.jira_key, self._current_note_title, content)
-                
-                # Delete the draft since we've saved the full version
-                try:
-                    self.db_service.delete_draft(self.jira_key, self._current_note_title)
-                except Exception:
-                    pass
-                    
-                # Mostra un feedback visivo temporaneo che indica che la nota è stata salvata
-                self._show_save_indicator()
-        except Exception as e:
-            _logger.error(f"Error saving note: {e}")
-            # Best-effort save; do not raise from UI timer
-            pass
+        # Disabled automatic saving - users now manage notes through Notes Manager
+        pass
     
     def _show_save_indicator(self):
         """Shows a temporary visual indicator that the note was saved."""
@@ -1242,8 +1223,7 @@ class JiraDetailController(QObject):
             if reply == QMessageBox.StandardButton.Yes:
                 initial_content = draft_content
         
-        # Create a new empty note in the database first
-        self.db_service.save_annotation(self.jira_key, title, initial_content)
+        # Note: No longer auto-creating notes in DB - users must use Notes Manager
 
         # Create the editor and add the tab
         editor = self._create_note_tab(title, initial_content)
@@ -1252,14 +1232,9 @@ class JiraDetailController(QObject):
         index = self.view.notes_tab_widget.indexOf(editor)
         self.view.notes_tab_widget.setCurrentIndex(index)
 
-        # Explicitly set the current note title and connect the auto-save timers
+        # Set the current note title - removed autosave timers
         self._current_note_title = title
-        if hasattr(self, 'autosave_timer'):
-            self._active_note_editor = editor
-            # Connect to draft autosave timer (runs every 2 seconds)
-            self._active_note_editor.textChanged.connect(self.autosave_timer.start)
-            # Connect to full save timer (runs after 10 seconds of inactivity)
-            self._active_note_editor.textChanged.connect(self.full_save_timer.start)
+        self._active_note_editor = editor
             
         # Start async loading of issue links to update the note
         self._start_async_links_loading()

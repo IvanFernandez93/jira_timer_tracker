@@ -14,6 +14,7 @@ from controllers.history_view_controller import HistoryViewController
 from controllers.sync_queue_controller import SyncQueueController
 from controllers.notification_controller import NotificationController
 from services.network_service import NetworkService
+from services.startup_coordinator import StartupCoordinator
 
 
 class MainController(QObject):
@@ -24,6 +25,11 @@ class MainController(QObject):
     def __init__(self, view, db_service, jira_service, app_settings, timezone_service=None):
         super().__init__()
         self._logger = logging.getLogger('JiraTimeTracker')
+        
+        # Set startup flag immediately to suppress notifications during initialization
+        self.is_during_startup = True
+        self._logger.info(f"[STARTUP] Flag is_during_startup set to True in constructor")
+        
         self.view = view
         self.db_service = db_service
         self.jira_service = jira_service
@@ -43,11 +49,8 @@ class MainController(QObject):
         self.start_at = 0
         self.all_results_loaded = False
         
-        # Initialize data management attributes
-        self.is_loading = False
-        self.current_issues = []
-        self.start_at = 0
-        self.all_results_loaded = False
+        # Initialize startup coordinator for async startup
+        self.startup_coordinator = None
         
         self._active_timer_key = None
         self._active_timer_seconds = 0
@@ -253,8 +256,115 @@ class MainController(QObject):
             except Exception as e:
                 self._logger.exception(f"[DEBUG] Errore durante l'elaborazione della selezione: {e}")
 
+    def start_async_startup(self):
+        """Starts the application using async startup coordinator for better UX."""
+        if self.startup_coordinator:
+            return  # Already started
+            
+        # Ensure startup flag is set (should already be set in __init__)
+        self.is_during_startup = True
+        
+        # Initialize startup coordinator
+        self.startup_coordinator = StartupCoordinator(self)
+        
+        # Connect startup coordinator signals - using the actual signatures
+        self.startup_coordinator.ui_ready.connect(self._on_startup_ui_ready)
+        self.startup_coordinator.data_loaded.connect(self._on_startup_data_ready)
+        self.startup_coordinator.startup_completed.connect(self._on_startup_completed)
+        
+        # Start coordinated startup
+        self.startup_coordinator.start_coordinated_startup()
+    
+    def _on_startup_ui_ready(self):
+        """Called when UI should be made available - StartupCoordinator handles UI setup."""
+        self._logger.info("Startup coordinator reports UI ready")
+        
+        # Load cached issues immediately using get_recent_issues
+        try:
+            recent_issues = self.db_service.get_recent_issues(limit=20)
+            
+            if recent_issues:
+                self._logger.info(f"Loading {len(recent_issues)} cached issues for immediate display")
+                
+                # Get local times for the grid population
+                local_times = self.db_service.get_all_local_times()
+                
+                # Temporarily disconnect search filter
+                try:
+                    self.view.jira_grid_view.search_box.textChanged.disconnect(self._filter_grid)
+                except:
+                    pass  # May not be connected yet
+                
+                # Convert cached issues to the format expected by _add_issue_to_grid
+                self.current_issues = []  # Reset current issues
+                for cached_issue in recent_issues:
+                    # Convert cached format to Jira API format
+                    issue_data = {
+                        'key': cached_issue['key'],
+                        'fields': {
+                            'summary': cached_issue['summary'],
+                            'status': {'name': cached_issue['status']},
+                            'priority': {'name': cached_issue['priority']}
+                        }
+                    }
+                    self._add_issue_to_grid(issue_data, local_times)
+                    self.current_issues.append(issue_data)
+                
+                # Reconnect and apply current filter
+                self.view.jira_grid_view.search_box.textChanged.connect(self._filter_grid)
+                self._filter_grid(self.view.jira_grid_view.search_box.text())
+                
+        except Exception as e:
+            self._logger.warning(f"Could not load cached issues: {e}")
+    
+    def _on_startup_data_ready(self, result_data):
+        """Called when fresh JIRA data has been loaded in background."""
+        if not result_data or not result_data.get('issues'):
+            self._logger.info("No fresh JIRA data available")
+            return
+            
+        fresh_issues = result_data['issues']
+        self._logger.info(f"Background data loaded with {len(fresh_issues)} fresh issues")
+        
+        # Update with fresh JIRA data by clearing and repopulating the grid
+        if fresh_issues:
+            # Clear current data
+            self.current_issues = []
+            self.view.jira_grid_view.jira_table.setRowCount(0)
+            
+            # Get local times for the grid population  
+            local_times = self.db_service.get_all_local_times()
+            
+            # Temporarily disconnect search filter
+            self.view.jira_grid_view.search_box.textChanged.disconnect(self._filter_grid)
+            
+            # Populate with fresh data
+            for issue in fresh_issues:
+                self._add_issue_to_grid(issue, local_times)
+                self.current_issues.append(issue)
+            
+            # Reconnect and apply current filter
+            self.view.jira_grid_view.search_box.textChanged.connect(self._filter_grid)
+            self._filter_grid(self.view.jira_grid_view.search_box.text())
+        
+        # Clear loading status
+        self.view.jira_grid_view.hide_loading()
+        
+        # Update network status
+        self.view.update_network_status(self.is_internet_available, self.is_jira_available)
+    
+    def _on_startup_completed(self):
+        """Called when startup process is completely finished.""" 
+        self._logger.info("Async startup process completed successfully")
+        
+        # Clear startup flag to allow normal notifications
+        self.is_during_startup = False
+        
+        # Update network status
+        self.view.update_network_status(self.is_internet_available, self.is_jira_available)
+
     def show_initial_view(self):
-        """Shows the default view and triggers data loading."""
+        """Legacy method - shows the default view and triggers data loading synchronously."""
         # Set the initial interface to the Jira grid
         self.view.navigationInterface.setCurrentItem(self.view.jira_grid_view.objectName())
         
@@ -2345,10 +2455,11 @@ class MainController(QObject):
             self.is_jira_available = False
             self.view.update_network_status(False, False)
             
-            # Show a brief message to inform the user
-            self._show_offline_notification("Connessione internet persa", 
-                "L'applicazione continuerà a funzionare in modalità offline.\n"
-                "I dati saranno salvati localmente e sincronizzati quando la connessione sarà ripristinata.")
+            # Show a brief message to inform the user (not during startup)
+            if not getattr(self, 'is_during_startup', False):
+                self._show_offline_notification("Connessione internet persa", 
+                    "L'applicazione continuerà a funzionare in modalità offline.\n"
+                    "I dati saranno salvati localmente e sincronizzati quando la connessione sarà ripristinata.")
             
     def _on_jira_connection_changed(self, is_connected: bool):
         """Handles changes in JIRA connection state."""
@@ -2359,12 +2470,14 @@ class MainController(QObject):
         # Update the UI indicator
         self.view.update_network_status(self.is_internet_available, self.is_jira_available)
         
-        # If JIRA just came back online
-        if is_connected and not old_state:
+        # If JIRA just came back online and we're not during startup
+        if is_connected and not old_state and not getattr(self, 'is_during_startup', False):
             # Show a message
             self._show_offline_notification("Connessione a JIRA ripristinata", 
                 "L'applicazione è ora in modalità online.\n"
                 "Le modifiche locali possono essere sincronizzate con il server.")
+        elif is_connected and not old_state and getattr(self, 'is_during_startup', False):
+            self._logger.info("[STARTUP] JIRA connection restored during startup - suppressing notification")
             
             # Try to sync pending operations if auto-sync is enabled
             auto_sync = self.app_settings.get_setting("auto_sync", "false").lower() == "true"
@@ -2400,10 +2513,11 @@ class MainController(QObject):
                 # Aggiorna l'indicatore
                 self.view.update_network_status(self.is_internet_available, self.is_jira_available)
                 
-                # Informo l'utente
-                self._show_offline_notification("Connessione a JIRA ripristinata", 
-                    "L'applicazione è tornata in modalità online.\n"
-                    "Le modifiche locali possono essere sincronizzate con il server.")
+                # Informo l'utente solo se non siamo durante l'avvio
+                if not getattr(self, 'is_during_startup', False):
+                    self._show_offline_notification("Connessione a JIRA ripristinata", 
+                        "L'applicazione è tornata in modalità online.\n"
+                        "Le modifiche locali possono essere sincronizzate con il server.")
                 
                 return True
         except Exception as e:
@@ -2457,6 +2571,11 @@ class MainController(QObject):
     
     def _show_offline_notification(self, title, message):
         """Shows a non-modal notification about network status changes."""
+        # Suppress notifications during startup to avoid cluttering the UI
+        if getattr(self, 'is_during_startup', False):
+            self._logger.info(f"Startup: Suppressing notification '{title}': {message}")
+            return
+            
         try:
             from PyQt6.QtWidgets import QMessageBox
             msg = QMessageBox(self.view)
@@ -2477,3 +2596,64 @@ class MainController(QObject):
         # For this implementation, we'll trigger it when connection is restored
         # and if auto-sync is enabled
         pass
+
+    def load_cached_issues_immediately(self):
+        """Load cached issues immediately for responsive UI startup."""
+        try:
+            self._logger.info("Loading cached issues for immediate display")
+            
+            # Get recent cached issues
+            recent_issues = self.db_service.get_recent_issues(limit=20)
+            
+            if recent_issues:
+                self._logger.info(f"Found {len(recent_issues)} cached issues")
+                
+                # Load cached data through the standard pipeline
+                self._on_data_loaded(recent_issues)
+                
+                # Update status using the standard method
+                # Status will be updated by _on_data_loaded
+            else:
+                self._logger.info("No cached issues found")
+                self.view.jira_grid_view.show_loading(True)
+                
+        except Exception as e:
+            self._logger.error(f"Error loading cached issues: {e}")
+
+    def start_background_data_loading(self):
+        """Start background data loading without blocking the UI."""
+        try:
+            self._logger.info("Starting background data loading")
+            
+            # Clear startup flag after UI is shown
+            self.is_during_startup = False
+            
+            # Start async history loading for better performance
+            if hasattr(self, 'history_controller') and self.history_controller:
+                self.history_controller.start_async_title_loading()
+            
+            # If connected, start background refresh
+            if self.is_jira_available and self.jira_service.is_connected():
+                # Use a timer to start background refresh after a short delay
+                QTimer.singleShot(1000, self._start_background_refresh)
+            else:
+                # Update status to show offline mode
+                if not self.current_issues:
+                    self.view.jira_grid_view.show_error("Modalità offline - dati da cache")
+                
+        except Exception as e:
+            self._logger.error(f"Error starting background data loading: {e}")
+
+    def _start_background_refresh(self):
+        """Start background refresh of JIRA data."""
+        try:
+            self._logger.info("Starting background refresh of JIRA data")
+            
+            # Update status
+            self.view.jira_grid_view.show_loading(True)
+            
+            # Refresh current issues in background
+            self.load_jira_issues()
+            
+        except Exception as e:
+            self._logger.error(f"Error during background refresh: {e}")

@@ -158,27 +158,43 @@ class JiraGridView(QWidget):
         self.animation_counter += 1
         
     def show_loading(self, is_loading):
-        """Shows or hides the loading indicator."""
+        """Shows or hides the loading indicator - DEPRECATED. Use show_status_message instead."""
         if is_loading:
-            # Start the loading animation
+            self.show_status_message("Loading...", is_loading=True)
+        else:
+            self.hide_loading_status()
+
+    def show_status_message(self, message: str, is_loading: bool = False):
+        """
+        Shows a status message without blocking the UI.
+        New non-blocking approach for better UX.
+        """
+        if is_loading:
+            # Start the loading animation but keep UI enabled
             self.animation_timer.start(200)  # Update every 200ms
-            self.status_label.setText("Loading...")
+            self.status_label.setText(message)
             self.error_label.setVisible(False)
             
-            # Position the overlay over the table
+            # Position the overlay over the table but make it less intrusive
             self.loading_overlay.setGeometry(self.table.geometry())
-            self.loading_overlay.raise_()  # Bring to front
+            self.loading_overlay.setStyleSheet("""
+                background-color: rgba(255, 255, 255, 120); 
+                border: 1px solid #007ACC; 
+                border-radius: 8px;
+            """)
+            self.loading_overlay.raise_()
             self.loading_overlay.setVisible(True)
             
-            # Disable controls during loading
-            self._set_controls_enabled(False)
+            # Keep all controls enabled for better UX
+            self._set_controls_enabled_non_blocking()
         else:
-            # Stop the loading animation and hide the overlay
-            self.animation_timer.stop()
-            self.loading_overlay.setVisible(False)
-            
-            # Re-enable controls after loading
-            self._set_controls_enabled(True)
+            self.hide_loading_status()
+
+    def hide_loading_status(self):
+        """Hides the loading status and re-enables all controls."""
+        self.animation_timer.stop()
+        self.loading_overlay.setVisible(False)
+        self._set_controls_enabled(True)
 
     def _set_controls_enabled(self, enabled):
         """Enable or disable controls during loading."""
@@ -187,6 +203,27 @@ class JiraGridView(QWidget):
         
         # Keep search box enabled - users should be able to filter existing data
         self.search_box.setEnabled(True)
+        
+        # Keep toolbar buttons enabled for better UX
+        if hasattr(self, 'refresh_btn'):
+            self.refresh_btn.setEnabled(enabled)
+        if hasattr(self, 'load_more_btn'):
+            self.load_more_btn.setEnabled(enabled)
+
+    def _set_controls_enabled_non_blocking(self):
+        """Enable all controls for non-blocking loading mode."""
+        # In modalità non-bloccante, tutto rimane abilitato
+        self.search_box.setEnabled(True)
+        
+        # Abilita tutti i controlli della toolbar
+        if hasattr(self, 'refresh_btn'):
+            self.refresh_btn.setEnabled(True)
+        if hasattr(self, 'load_more_btn'):
+            self.load_more_btn.setEnabled(True)
+        if hasattr(self, 'settings_btn'):
+            self.settings_btn.setEnabled(True)
+        if hasattr(self, 'notes_btn'):
+            self.notes_btn.setEnabled(True)
         
         # Keep JQL combo and apply button enabled - users should be able to change queries
         self.jql_combo.setEnabled(True)
@@ -312,6 +349,13 @@ class JiraGridView(QWidget):
     def get_jql_text(self):
         """Get the current JQL text from the combo box."""
         current_index = self.jql_combo.currentIndex()
+        current_text = self.jql_combo.currentText()
+        
+        # Handle manually typed text (index -1)
+        if current_index < 0:
+            return current_text
+            
+        # Handle selected items from the list
         if current_index >= 0:
             # Check if this is a favorite item (has associated data)
             item_data = self.jql_combo.itemData(current_index)
@@ -320,7 +364,6 @@ class JiraGridView(QWidget):
                 return item_data
             else:
                 # This is either manually typed text or the management option
-                current_text = self.jql_combo.currentText()
                 if current_text == "📚 Gestisci cronologia e preferiti...":
                     return ""  # Don't return the management option text
                 else:

@@ -152,6 +152,33 @@ class JiraService:
     def is_connected(self) -> bool:
         """Checks if the service is connected to Jira."""
         return self.jira is not None
+
+    def test_connection_quick(self) -> bool:
+        """
+        Testa velocemente la connessione JIRA con timeout ridotto.
+        Utilizzato per verifiche non bloccanti durante l'avvio.
+        """
+        if not self.jira:
+            return False
+        
+        try:
+            # Test veloce con timeout ridotto
+            original_timeout = getattr(self.jira._session, 'timeout', None)
+            if hasattr(self.jira._session, 'timeout'):
+                self.jira._session.timeout = 5  # 5 secondi per test veloce
+            
+            # Prova una chiamata semplice
+            self.jira.myself()
+            
+            # Ripristina il timeout originale
+            if original_timeout is not None and hasattr(self.jira._session, 'timeout'):
+                self.jira._session.timeout = original_timeout
+                
+            return True
+            
+        except Exception as e:
+            self._logger.debug(f"Test connessione veloce fallito: {e}")
+            return False
         
     def set_offline_state(self):
         """

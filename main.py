@@ -5,7 +5,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from PyQt6.QtWidgets import QApplication, QMessageBox, QDialog
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import QSettings, QTimer
 from qfluentwidgets import FluentTranslator, Theme, setTheme, isDarkTheme
 
 from views.main_window import MainWindow
@@ -19,6 +19,7 @@ from services.app_settings import AppSettings
 from services.credential_service import CredentialService
 from services.jira_service import JiraService
 from services.attachment_service import AttachmentService
+from services.startup_manager import AppStartupManager, init_logging, init_database_connection, init_git_repository, verify_jira_connection
 
 # Configurazione del logging
 def setup_logging(app_settings=None):
@@ -161,7 +162,85 @@ def exception_handler(exc_type, exc_value, exc_traceback):
     msg_box.setIcon(QMessageBox.Icon.Critical)
     msg_box.exec()
 
+def init_git_repository_wrapper(app_settings):
+    """Wrapper for git repository initialization."""
+    from services.git_service import GitService
+    git_service = GitService()
+    # Use the existing ensure_git_repo method
+    git_service.ensure_git_repo()
+    return True
+
+def _parse_int(value, default):
+    """Parse integer value with default fallback."""
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+def _parse_float(value, default):
+    """Parse float value with default fallback."""
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+def init_services(app_settings, db_service, cred_service):
+    """Initialize application services."""
+    # Get and apply retry settings
+    max_retries = _parse_int(app_settings.get_setting('jira/max_retries'), 3)
+    base_retry_delay = _parse_float(app_settings.get_setting('jira/base_retry_delay'), 0.5)
+    max_delay = _parse_float(app_settings.get_setting('jira/max_delay'), 30.0)
+
+    # Parse non-retryable statuses if provided (comma-separated)
+    non_retry_csv = app_settings.get_setting('jira/non_retryable_statuses')
+    non_retryable_statuses = None
+    if non_retry_csv:
+        try:
+            non_retryable_statuses = [int(s.strip()) for s in non_retry_csv.split(',') if s.strip()]
+        except Exception:
+            non_retryable_statuses = None
+
+    # Initialize timezone service
+    from services.timezone_service import TimezoneService
+    timezone_service = TimezoneService(app_settings)
+    
+    # Instantiate JiraService with configured retry policy
+    jira_service = JiraService(
+        max_retries=max_retries,
+        base_retry_delay=base_retry_delay,
+        max_delay=max_delay,
+        non_retryable_statuses=non_retryable_statuses,
+    )
+    
+    # Initialize attachment service
+    attachment_service = AttachmentService(db_service, jira_service)
+    
+    return {
+        'jira_service': jira_service,
+        'attachment_service': attachment_service,
+        'timezone_service': timezone_service
+    }
+
+def verify_jira_connection_wrapper(app_settings, cred_service):
+    """Wrapper for JIRA connection verification."""
+    jira_url = app_settings.get_setting("JIRA_URL")
+    pat = cred_service.get_pat(jira_url)
+    
+    if jira_url and pat:
+        # Create temporary service for verification
+        jira_service = JiraService()
+        # Simple connection test
+        try:
+            jira_service.connect(jira_url, pat)
+            return True
+        except:
+            return False
+    return False
+
+
+
 def main():
+    """Main application entry point."""
     # Configurazione iniziale del logging (prima di caricare le impostazioni)
     logger = setup_logging()
     
@@ -185,7 +264,10 @@ def main():
         use_dark = bool(int(use_dark))  # Convert from QVariant to bool
     
     # Apply theme
-    setTheme(Theme.DARK if use_dark else Theme.LIGHT)
+    if use_dark:
+        setTheme(Theme.DARK)
+    else:
+        setTheme(Theme.LIGHT)
 
     # Internationalization
     translator = FluentTranslator()
@@ -313,8 +395,16 @@ def main():
     main_controller.is_internet_available = True  # Presumed true since we got to this point
     main_controller.is_jira_available = jira_service.is_connected()
     
-    main_controller.show_initial_view() # Show default view (req 2.3.5)
+    # Show window immediately without blocking startup
     main_window.show()
+    
+    # Load cached data first for immediate UI responsiveness
+    main_controller.load_cached_issues_immediately()
+    
+    # Start background data loading without blocking UI
+    main_controller.start_background_data_loading()
+    
+    # Start the Qt event loop
     sys.exit(app.exec())
 
 if __name__ == "__main__":
