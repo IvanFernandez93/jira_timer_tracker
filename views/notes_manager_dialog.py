@@ -485,7 +485,7 @@ class NotesManagerDialog(QDialog):
                 self.jira_service.mark_ticket_as_fictitious(jira_key)
             elif self.jira_service and jira_key and not is_fictitious:
                 # If it's now marked as NOT fictitious, remove it from the cache
-                self.jira_service.mark_ticket_as_real(jira_key)
+                self.jira_service.unmark_ticket_as_fictitious(jira_key)
 
             self.save_btn.setEnabled(False)
             

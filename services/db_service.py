@@ -378,7 +378,8 @@ class DatabaseService:
                 'is_deleted': bool(row[5]),
                 'deleted_at': row[6],
                 'created_at': row[7],
-                'updated_at': row[8]
+                'updated_at': row[8],
+                'is_fictitious': bool(row[9])
             }
         finally:
             conn.close()
