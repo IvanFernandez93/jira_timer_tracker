@@ -50,13 +50,22 @@ class NotesManagerDialog(QDialog):
         
         # Initialize advanced note management system
         from services.git_service import GitService
+        from services.notes_filesystem_manager import NotesFileSystemManager
+        
         self.git_service = GitService()
         self.note_manager = NoteManager(self.db_service, self.git_service)
+        self.fs_manager = NotesFileSystemManager()  # File system manager per cartelle JIRA
         
         # Current state tracking
         self.current_note_id = None
         self.current_note_state: Optional[NoteState] = None
         self.show_deleted = False
+        
+        # Auto-save timer
+        self.auto_save_timer = QTimer()
+        self.auto_save_timer.setSingleShot(True)
+        self.auto_save_timer.timeout.connect(self._perform_auto_save)
+        self.auto_save_delay = 2000  # 2 seconds
         
         # Connect note manager signals
         self.note_manager.note_state_changed.connect(self._on_note_state_changed)
@@ -203,8 +212,7 @@ class NotesManagerDialog(QDialog):
         self.content_edit.setPlaceholderText("Contenuto della nota (Markdown supportato)...")
         self.content_edit.setMinimumHeight(200)
         
-        # Connect to optimized change detection
-        self.content_edit.textChanged.connect(self._on_content_changed_optimized)
+        # Content changes will be handled by on_content_changed method below
         
         self.editor_header_layout.addWidget(self.content_edit)
 
@@ -237,10 +245,10 @@ class NotesManagerDialog(QDialog):
         # Action buttons
         self.actions_layout = QHBoxLayout()
 
-        self.save_btn = PrimaryPushButton("Salva bozza")
-        self.save_btn.setIcon(FIF.SAVE)
+        self.save_btn = PrimaryPushButton("Modifica")  # Changed from "Salva bozza" 
+        self.save_btn.setIcon(FIF.EDIT)
         self.save_btn.setEnabled(False)
-        self.save_btn.setToolTip("Salva come bozza (modificabile)")
+        self.save_btn.setToolTip("Modifica nota (conversione a bozza)")
 
         self.commit_btn = PushButton("Commit")
         self.commit_btn.setIcon(FIF.ACCEPT)
@@ -256,11 +264,30 @@ class NotesManagerDialog(QDialog):
         self.restore_btn.setEnabled(False)
         self.restore_btn.setVisible(False)
 
+        # File system actions
+        self.open_folder_btn = PushButton("Apri Cartella")
+        self.open_folder_btn.setIcon(FIF.FOLDER)
+        self.open_folder_btn.setEnabled(False)
+        self.open_folder_btn.setToolTip("Apri cartella nota in File Explorer")
+
+        self.open_external_btn = PushButton("Editor Esterno")
+        self.open_external_btn.setIcon(FIF.EDIT)
+        self.open_external_btn.setEnabled(False)
+        self.open_external_btn.setToolTip("Apri con editor esterno (VS Code, Notepad++, etc.)")
+
+        self.git_history_btn = PushButton("Cronologia")
+        self.git_history_btn.setIcon(FIF.HISTORY)
+        self.git_history_btn.setEnabled(False)
+        self.git_history_btn.setToolTip("Mostra cronologia Git della nota")
+
         self.actions_layout.addWidget(self.save_btn)
         self.actions_layout.addWidget(self.commit_btn)
         self.actions_layout.addWidget(self.delete_btn)
         self.actions_layout.addWidget(self.restore_btn)
         self.actions_layout.addStretch()
+        self.actions_layout.addWidget(self.open_folder_btn)
+        self.actions_layout.addWidget(self.open_external_btn)
+        self.actions_layout.addWidget(self.git_history_btn)
 
         self.editor_header_layout.addLayout(self.actions_layout)
 
@@ -296,6 +323,9 @@ class NotesManagerDialog(QDialog):
         self.commit_btn.clicked.connect(self._handle_commit_action)
         self.delete_btn.clicked.connect(self.delete_note)
         self.restore_btn.clicked.connect(self.restore_note)
+        self.open_folder_btn.clicked.connect(self._open_note_folder)
+        self.open_external_btn.clicked.connect(self._open_with_external_editor)
+        self.git_history_btn.clicked.connect(self._show_git_history)
         self.title_edit.textChanged.connect(self.on_content_changed)
         self.content_edit.textChanged.connect(self.on_content_changed)
         self.tags_edit.textChanged.connect(self.on_content_changed)
@@ -429,10 +459,27 @@ class NotesManagerDialog(QDialog):
         """Create a new note."""
         self.current_note_id = None
         self.clear_editor()
-        self.save_btn.setEnabled(True)
-        self.delete_btn.setEnabled(False)
-        self.restore_btn.setEnabled(False)
-        self.restore_btn.setVisible(False)
+        
+        # Stop any ongoing auto-save
+        self.note_manager.stop_auto_save()
+        
+        # Create new note state
+        class NewNoteState:
+            def __init__(self):
+                self.note_id = None
+                self.is_draft = False
+                self.is_committed = False
+                self.is_new = True
+                self.last_saved = None
+                self.last_committed = None
+                self.state_name = 'new'
+        
+        new_state = NewNoteState()
+        self.current_note_state = new_state
+        
+        # Apply new note UI state
+        self._update_ui_for_state(new_state)
+        
         self.title_edit.setFocus()
 
     def clear_editor(self):
@@ -440,7 +487,7 @@ class NotesManagerDialog(QDialog):
         self.jira_key_edit.clear()
         self.title_edit.clear()
         self.tags_edit.clear()
-        self.fictitious_cb.setChecked(False)
+        self.fictitious_cb.setChecked(True)  # ATTIVATO DI DEFAULT per tutte le nuove note
         self.content_edit.setMarkdown("")
         self.info_label.clear()
 
@@ -473,16 +520,25 @@ class NotesManagerDialog(QDialog):
 
             # Update UI with note data
             self.current_note_id = note_id
-            self.jira_key_edit.setText(note.get('jira_key', ''))
-            self.title_edit.setText(note.get('title', ''))
-            self.tags_edit.setText(note.get('tags', ''))
+            self.jira_key_edit.setText(note.get('jira_key', '') or '')
+            self.title_edit.setText(note.get('title', '') or '')
+            self.tags_edit.setText(note.get('tags', '') or '')
             self.fictitious_cb.setChecked(note.get('is_fictitious', False))
             
             # Set content and calculate hash for change detection
-            content = note.get('content', '')
+            content = note.get('content', '') or ''
             self.content_edit.setMarkdown(content)
             self._last_content_hash = hash(content)
             self._content_changed = False
+
+            # Set the appropriate editing mode based on note state
+            if state.is_draft:
+                self._set_note_editing_mode('draft')
+            else:
+                self._set_note_editing_mode('committed')
+                
+            # Store the current note state object for reference
+            self.current_note_state = state
 
             # Update JIRA-related button states
             has_jira = bool(note.get('jira_key'))
@@ -496,13 +552,13 @@ class NotesManagerDialog(QDialog):
             # Update info label
             try:
                 # Converti tutte le date da UTC a fuso orario locale
-                created_dt = datetime.fromisoformat(note['created_at'].replace('Z', '+00:00')).astimezone()
-                updated_dt = datetime.fromisoformat(note['updated_at'].replace('Z', '+00:00')).astimezone()
+                created_dt = datetime.fromisoformat(note.get('created_at', '').replace('Z', '+00:00')).astimezone()
+                updated_dt = datetime.fromisoformat(note.get('updated_at', '').replace('Z', '+00:00')).astimezone()
                 created_str = created_dt.strftime("%d/%m/%Y %H:%M")
                 updated_str = updated_dt.strftime("%d/%m/%Y %H:%M")
 
-                if note['is_deleted']:
-                    deleted_dt = datetime.fromisoformat(note['deleted_at'].replace('Z', '+00:00')).astimezone()
+                if note.get('is_deleted', False):
+                    deleted_dt = datetime.fromisoformat(note.get('deleted_at', '').replace('Z', '+00:00')).astimezone()
                     deleted_str = deleted_dt.strftime("%d/%m/%Y %H:%M")
                     self.info_label.setText(f"Creata: {created_str} | Aggiornata: {updated_str} | Eliminata: {deleted_str}")
                 else:
@@ -510,19 +566,33 @@ class NotesManagerDialog(QDialog):
             except:
                 self.info_label.setText("")
 
-            # Update button states
-            self.save_btn.setEnabled(False)  # Will be enabled when content changes
-            self.delete_btn.setEnabled(not note['is_deleted'])
-            self.restore_btn.setEnabled(note['is_deleted'])
-            self.restore_btn.setVisible(note['is_deleted'])
+            # Button states will be handled by _set_note_editing_mode
+            self.delete_btn.setEnabled(not note.get('is_deleted', False))
+            self.restore_btn.setEnabled(note.get('is_deleted', False))
+            self.restore_btn.setVisible(note.get('is_deleted', False))
+
+            # Restart auto-save for the loaded note
+            self.note_manager.start_auto_save()
 
         except Exception as e:
             QMessageBox.warning(self, "Errore", f"Errore nel caricamento della nota: {str(e)}")
 
     def on_content_changed(self):
         """Handle content changes in the editor."""
-        if self.current_note_id is not None:
-            self.save_btn.setEnabled(True)
+        # Auto-save per note nuove E bozze
+        if self.current_note_state:
+            if self.current_note_state.state_name == 'new':
+                # Per note nuove: auto-save immediato quando c'è contenuto
+                if (self.title_edit.text().strip() or 
+                    self.content_edit.toMarkdown().strip() or 
+                    self.jira_key_edit.text().strip()):
+                    self.auto_save_timer.start(1000)  # 1 secondo per note nuove
+                    self._update_draft_status_label("✨ Salvataggio automatico in corso...")
+                    
+            elif self.current_note_state.state_name == 'draft':
+                # Per bozze: auto-save normale
+                self.auto_save_timer.start(self.auto_save_delay)
+                self._update_draft_status_label("📝 Modifiche in corso...")
 
     def save_note(self):
         """Save the current note."""
@@ -613,7 +683,7 @@ class NotesManagerDialog(QDialog):
                     success, note_id, state = self.note_manager.create_new_note(note_data)
                     if success:
                         self.current_note_id = note_id
-                        self._refresh_notes_list()
+                        self.load_notes()
                         self._select_note_by_id(note_id)
                 return
             
@@ -621,14 +691,14 @@ class NotesManagerDialog(QDialog):
                 # Convert to draft for editing
                 success = self.note_manager.convert_to_draft(self.current_note_id)
                 if success:
-                    self._refresh_notes_list()
+                    self.load_notes()
             elif self.current_note_state.state_name in ['draft', 'new']:
                 # Save as draft
                 note_data = self._collect_note_data()
                 if note_data:
                     success = self.note_manager.save_draft(self.current_note_id, note_data)
                     if success:
-                        self._refresh_notes_list()
+                        self.load_notes()
                         
         except Exception as e:
             logger.error(f"Save action failed: {e}")
@@ -668,7 +738,7 @@ class NotesManagerDialog(QDialog):
     def _on_note_saved(self, note_id: int, message: str):
         """Handle successful note save."""
         self._update_draft_status_label(f"✓ {message}")
-        self._refresh_notes_list()
+        self.load_notes()
         
     def _on_note_error(self, error_message: str):
         """Handle note management errors."""
@@ -677,33 +747,71 @@ class NotesManagerDialog(QDialog):
     def _update_ui_for_state(self, state: NoteState):
         """Update UI elements based on note state."""
         if state.state_name == 'committed':
+            # Nota committata - readonly, file system accessibile
             self.content_edit.setReadOnly(True)
             self.title_edit.setReadOnly(True)
             self.jira_key_edit.setReadOnly(True)
             self.tags_edit.setReadOnly(True)
             self.fictitious_cb.setEnabled(False)
+            
+            # Pulsanti per note committate
+            self.save_btn.setVisible(False)  # Non serve salvare draft
+            self.commit_btn.setText("Modifica")
+            self.commit_btn.setEnabled(True)
+            self.commit_btn.setToolTip("Converti in bozza per modificare")
+            self.commit_btn.setIcon(FIF.EDIT)
+            
+            # File system actions disponibili
+            self.open_folder_btn.setEnabled(True)
+            self.open_external_btn.setEnabled(True)
+            self.git_history_btn.setEnabled(True)
+            
             self._update_draft_status_label("📋 COMMITTATA")
             
         elif state.state_name == 'draft':
+            # Nota in draft - modificabile, auto-save
             self.content_edit.setReadOnly(False)
             self.title_edit.setReadOnly(False)
             self.jira_key_edit.setReadOnly(False)
             self.tags_edit.setReadOnly(False)
             self.fictitious_cb.setEnabled(True)
-            self._update_draft_status_label("📝 BOZZA")
+            
+            # Pulsanti per draft
+            self.save_btn.setVisible(False)  # Auto-save attivo
+            self.commit_btn.setText("Commit")
+            self.commit_btn.setEnabled(True)
+            self.commit_btn.setToolTip("Commit definitivo (readonly)")
+            self.commit_btn.setIcon(FIF.ACCEPT)
+            
+            # File system actions parzialmente disponibili
+            self.open_folder_btn.setEnabled(True)
+            self.open_external_btn.setEnabled(True)
+            self.git_history_btn.setEnabled(False)  # Solo per note committate
+            
+            self._update_draft_status_label("📝 BOZZA - Auto-save attivo")
             
         else:  # new
+            # Nota nuova - modificabile, salvataggio automatico
             self.content_edit.setReadOnly(False)
             self.title_edit.setReadOnly(False)
             self.jira_key_edit.setReadOnly(False)
             self.tags_edit.setReadOnly(False)
             self.fictitious_cb.setEnabled(True)
-            self._update_draft_status_label("✨ NUOVA")
-            now = datetime.now().strftime("%H:%M:%S")
-            self._update_draft_status_label(f"💾 Bozza salvata alle {now}")
-                
-        except Exception as e:
-            QMessageBox.warning(self, "Errore", f"Errore nel salvare la bozza: {e}")
+            
+            # Pulsanti per nuova nota - NO pulsante bozza, auto-save attivo
+            self.save_btn.setVisible(False)  # Nessun pulsante bozza, tutto automatico
+            
+            self.commit_btn.setText("Commit")
+            self.commit_btn.setEnabled(False)  # Abilitato solo dopo primo salvataggio auto
+            self.commit_btn.setToolTip("Disponibile dopo il primo salvataggio automatico")
+            self.commit_btn.setIcon(FIF.ACCEPT)
+            
+            # File system actions non disponibili inizialmente
+            self.open_folder_btn.setEnabled(False)
+            self.open_external_btn.setEnabled(False)
+            self.git_history_btn.setEnabled(False)
+            
+            self._update_draft_status_label("✨ NUOVA - Salvataggio automatico all'inserimento dati")
 
     def _convert_to_draft(self):
         """Convert a committed note back to draft mode for editing."""
@@ -746,8 +854,8 @@ class NotesManagerDialog(QDialog):
                 return
                 
             if self.current_note_state.state_name == 'committed':
-                # Show git history
-                self._show_git_history()
+                # Convert to draft for editing
+                self._convert_to_draft()
             elif self.current_note_state.state_name == 'draft':
                 # Commit the note
                 self._commit_note_advanced()
@@ -786,7 +894,7 @@ class NotesManagerDialog(QDialog):
             success = self.note_manager.commit_note(self.current_note_id, commit_message.strip())
             
             if success:
-                self._refresh_notes_list()
+                self.load_notes()
                 
         except Exception as e:
             logger.error(f"Advanced commit failed: {e}")
@@ -892,19 +1000,18 @@ class NotesManagerDialog(QDialog):
         COMMITTED MODE: 🟢 Readonly content, Edit + Commit + Delete available  
         NEW MODE: 🆕 Editable content, Save Draft available
         """
-        self.current_note_state = note_state
+        # Store the mode string for UI logic
+        self.current_editing_mode = note_state
         
         if note_state == 'draft':
-            # DRAFT: Content editable, can save draft or commit
+            # DRAFT: Content editable, auto-save on changes, can commit
             self.content_edit.setReadOnly(False)
             self.jira_key_edit.setReadOnly(False)
             self.title_edit.setReadOnly(False) 
             self.tags_edit.setReadOnly(False)
             
-            # Button visibility
-            self.save_btn.setVisible(True)
-            self.save_btn.setText("💾 Salva Bozza")
-            self.save_btn.setToolTip("Salva modifiche come bozza")
+            # Button visibility - NO MORE SAVE BUTTON
+            self.save_btn.setVisible(False)  # Nascosto - salvataggio automatico
             
             self.commit_btn.setVisible(True)
             self.commit_btn.setText("✅ Commit")
@@ -939,16 +1046,14 @@ class NotesManagerDialog(QDialog):
             self._apply_editing_styles(True)
             
         elif note_state == 'new':
-            # NEW: Content editable, only save as draft available
+            # NEW: Content editable, auto-save attivato, no manual save button
             self.content_edit.setReadOnly(False)
             self.jira_key_edit.setReadOnly(False)
             self.title_edit.setReadOnly(False)
             self.tags_edit.setReadOnly(False)
             
-            # Button visibility
-            self.save_btn.setVisible(True)
-            self.save_btn.setText("💾 Salva Bozza")
-            self.save_btn.setToolTip("Salva nuova nota come bozza")
+            # Button visibility - NO SAVE BUTTON
+            self.save_btn.setVisible(False)  # Nascosto - salvataggio automatico attivo
             
             self.commit_btn.setVisible(False)  # No commit until saved as draft
             self.delete_btn.setVisible(False)  # No delete for unsaved notes
@@ -972,7 +1077,7 @@ class NotesManagerDialog(QDialog):
             self.tags_edit.setStyleSheet("QLineEdit { background-color: white; border: 1px solid #ced4da; }")  
             self.content_edit.setStyleSheet("QTextEdit { background-color: white; border: 1px solid #ced4da; }")
 
-    def _update_status_labels(self, note: Dict):
+    def _update_status_labels(self, note):
         """Update status labels with draft and commit information."""
         is_draft = note.get('is_draft', False)
         
@@ -1082,8 +1187,24 @@ class NotesManagerDialog(QDialog):
         has_jira = bool(jira_key)
         self.open_jira_btn.setEnabled(has_jira)
         self.start_timer_btn.setEnabled(has_jira)
+        
+        # GESTIONE AUTOMATICA TICKET FITTIZIO
+        # Se c'è una JIRA key valida, disattiva "Ticket fittizio"
+        # Se non c'è JIRA key, attiva "Ticket fittizio"
+        if has_jira and self._is_valid_jira_key(jira_key):
+            self.fictitious_cb.setChecked(False)  # Disattiva per JIRA reale
+        else:
+            self.fictitious_cb.setChecked(True)   # Attiva per note generiche
+            
         # Chiamare anche il metodo originale per gestire le modifiche al contenuto
         self.on_content_changed()
+        
+    def _is_valid_jira_key(self, jira_key: str) -> bool:
+        """Check if JIRA key format is valid (PROJECT-123)."""
+        import re
+        # Pattern per chiave JIRA: lettere-numeri
+        pattern = r'^[A-Z][A-Z0-9]*-\d+$'
+        return bool(re.match(pattern, jira_key.upper()))
         
     def _start_timer(self):
         """Avvia il timer per il ticket Jira associato alla nota corrente."""
@@ -1130,6 +1251,240 @@ class NotesManagerDialog(QDialog):
                 self.notes_table.scrollToItem(item)
                 return
         
+    def _open_note_folder(self):
+        """Open note folder in File Explorer using file system manager."""
+        try:
+            if not self.current_note_id:
+                QMessageBox.information(self, "Info", "Nessuna nota selezionata")
+                return
+                
+            # Get note info to determine folder path
+            note = self.db_service.get_note_by_id(self.current_note_id)
+            if not note:
+                QMessageBox.warning(self, "Errore", "Nota non trovata")
+                return
+                
+            # Get JIRA key from note or current form
+            jira_key = note.get('jira_key') or self.jira_key_edit.text().strip()
+            if not jira_key:
+                jira_key = "GENERICO"
+                
+            # Use file system manager to get JIRA folder path
+            jira_folder_path = self.fs_manager.get_jira_folder_path(jira_key)
+            
+            # Ensure folder exists
+            self.fs_manager.ensure_jira_folder_exists(jira_key)
+            
+            # Open in explorer
+            import os
+            import subprocess
+            
+            if os.name == 'nt':  # Windows
+                subprocess.run(['explorer', str(jira_folder_path)])
+            else:  # macOS/Linux
+                subprocess.run(['open', str(jira_folder_path)] if os.uname().sysname == 'Darwin' 
+                             else ['xdg-open', str(jira_folder_path)])
+                
+            logger.info(f"Opened JIRA folder: {jira_folder_path}")
+                
+        except Exception as e:
+            logger.error(f"Failed to open folder: {e}")
+            QMessageBox.warning(self, "Errore", f"Impossibile aprire la cartella: {e}")
+
+    def _open_with_external_editor(self):
+        """Open note with external editor using file system manager."""
+        try:
+            if not self.current_note_id:
+                QMessageBox.information(self, "Info", "Nessuna nota selezionata")
+                return
+                
+            # Get note info
+            note = self.db_service.get_note_by_id(self.current_note_id)
+            if not note:
+                QMessageBox.warning(self, "Errore", "Nota non trovata")
+                return
+                
+            # Get JIRA key and title
+            jira_key = note.get('jira_key') or self.jira_key_edit.text().strip()
+            if not jira_key:
+                jira_key = "GENERICO"
+                
+            title = note.get('title', 'Nota senza titolo')
+            
+            # Get file path using file system manager
+            note_file_path = self.fs_manager.get_note_file_path(jira_key, title, self.current_note_id)
+            
+            # Ensure the note file exists and is up-to-date
+            content = note.get('content', '')
+            tags = note.get('tags', '')
+            is_fictitious = note.get('is_fictitious', False)
+            
+            success, message, file_path = self.fs_manager.save_note_to_file(
+                jira_key=jira_key,
+                note_title=title,
+                content=content,
+                note_id=self.current_note_id,
+                tags=tags,
+                is_fictitious=is_fictitious
+            )
+            
+            if not success:
+                QMessageBox.warning(self, "Errore", f"Impossibile preparare il file: {message}")
+                return
+            
+            # Open with external editor
+            import subprocess
+            
+            try:
+                # Try VS Code first
+                subprocess.run(['code', str(file_path)], check=True)
+                logger.info(f"Opened note in VS Code: {file_path}")
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                try:
+                    # Try system default
+                    import os
+                    if os.name == 'nt':  # Windows
+                        os.startfile(str(file_path))
+                    else:  # macOS/Linux
+                        subprocess.run(['open', str(file_path)] if os.uname().sysname == 'Darwin' 
+                                     else ['xdg-open', str(file_path)])
+                    logger.info(f"Opened note with system default: {file_path}")
+                except Exception:
+                    QMessageBox.information(self, "Info", 
+                        f"File creato in: {file_path}\n"
+                        f"Apri manualmente con il tuo editor preferito")
+                    
+        except Exception as e:
+            logger.error(f"Failed to open external editor: {e}")
+            QMessageBox.warning(self, "Errore", f"Impossibile aprire editor esterno: {e}")
+
+    def _show_git_history(self):
+        """Show Git history for the current note."""
+        try:
+            if not self.current_note_id:
+                QMessageBox.information(self, "Info", "Nessuna nota selezionata")
+                return
+                
+            # This would integrate with GitService in the future
+            QMessageBox.information(
+                self, 
+                "Cronologia Git", 
+                "Funzionalità Git tracking in sviluppo.\n\n"
+                "Mostrerà:\n"
+                "• Storia delle modifiche\n"
+                "• Commit e messaggi\n"
+                "• Diff tra versioni\n"
+                "• Ripristino versioni precedenti"
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to show git history: {e}")
+            QMessageBox.warning(self, "Errore", f"Errore nella cronologia: {e}")
+
+    def _perform_auto_save(self):
+        """Perform automatic save for new notes and drafts with file system integration."""
+        try:
+            # Collect current data
+            note_data = self._collect_note_data()
+            if not note_data:
+                return
+            
+            jira_key = note_data.jira_key
+            if not jira_key:
+                # Se non c'è chiave JIRA, usa "GENERICO" come cartella
+                jira_key = "GENERICO"
+            
+            title = note_data.title or 'Nota senza titolo'
+            
+            if self.current_note_state and self.current_note_state.state_name == 'new':
+                # NUOVA NOTA: Primo salvataggio automatico
+                logger.info(f"Auto-saving new note: {title} for JIRA: {jira_key}")
+                
+                # Salva nel database come bozza
+                if self.current_note_id:
+                    # Update existing note
+                    success = self.note_manager.save_draft(self.current_note_id, note_data)
+                else:
+                    # Create new note
+                    note_id = self.db_service.create_note(
+                        jira_key=jira_key,
+                        title=title,
+                        content=note_data.content,
+                        tags=note_data.tags,
+                        is_fictitious=note_data.is_fictitious,
+                        is_draft=True  # Sempre bozza inizialmente
+                    )
+                    if note_id:
+                        self.current_note_id = note_id
+                        success = True
+                    else:
+                        success = False
+                
+                if success:
+                    # Salva anche nel file system
+                    fs_success, fs_message, file_path = self.fs_manager.save_note_to_file(
+                        jira_key=jira_key,
+                        note_title=title,
+                        content=note_data.content,
+                        note_id=self.current_note_id,
+                        tags=note_data.tags,
+                        is_fictitious=note_data.is_fictitious
+                    )
+                    
+                    # Transizione a stato DRAFT
+                    class DraftState:
+                        def __init__(self, note_id):
+                            self.note_id = note_id
+                            self.is_draft = True
+                            self.is_committed = False
+                            self.is_new = False
+                            self.state_name = 'draft'
+                    
+                    draft_state = DraftState(self.current_note_id)
+                    self.current_note_state = draft_state
+                    self._update_ui_for_state(draft_state)
+                    
+                    now = datetime.now().strftime("%H:%M:%S")
+                    if fs_success:
+                        self._update_draft_status_label(f"💾 Bozza creata alle {now} in {file_path.parent.name}/")
+                        # Abilita pulsanti file system
+                        self.open_folder_btn.setEnabled(True)
+                        self.open_external_btn.setEnabled(True)
+                        self.commit_btn.setEnabled(True)
+                    else:
+                        self._update_draft_status_label(f"💾 Bozza salvata alle {now} (DB only)")
+                    
+                    self.load_notes()  # Ricarica la lista
+                    
+            elif self.current_note_state and self.current_note_state.state_name == 'draft':
+                # BOZZA ESISTENTE: Auto-save normale
+                if not self.current_note_id:
+                    return
+                    
+                # Salva nel database
+                success = self.note_manager.save_draft(self.current_note_id, note_data)
+                
+                if success:
+                    # Aggiorna anche il file system
+                    fs_success, fs_message, file_path = self.fs_manager.save_note_to_file(
+                        jira_key=jira_key,
+                        note_title=title,
+                        content=note_data.content,
+                        note_id=self.current_note_id,
+                        tags=note_data.tags,
+                        is_fictitious=note_data.is_fictitious
+                    )
+                    
+                    now = datetime.now().strftime("%H:%M:%S")
+                    if fs_success:
+                        self._update_draft_status_label(f"💾 Auto-salvato alle {now} in {file_path.parent.name}/")
+                    else:
+                        self._update_draft_status_label(f"💾 Auto-salvato alle {now}")
+                
+        except Exception as e:
+            logger.error(f"Auto-save failed: {e}")
+            self._update_draft_status_label(f"❌ Errore salvataggio: {str(e)[:50]}...")
+
     def closeEvent(self, event):
         """Handle dialog closing."""
         super().closeEvent(event)

@@ -601,16 +601,8 @@ class ConfigDialog(QDialog):
             app_settings.set_setting("notification_read_color", self._read_color)
 
     def save_editor_settings(self, app_settings):
-        """Save editor autosave settings."""
-        if app_settings and hasattr(self, 'draft_autosave_spinbox'):
-            # Save intervals in milliseconds
-            draft_interval_ms = self.draft_autosave_spinbox.value() * 1000
-            full_interval_ms = self.full_autosave_spinbox.value() * 1000
-            indicator_duration_ms = self.save_indicator_spinbox.value() * 1000
-            
-            app_settings.set_autosave_draft_interval(draft_interval_ms)
-            app_settings.set_autosave_full_interval(full_interval_ms)
-            app_settings.set_save_indicator_duration(indicator_duration_ms)
+        """Auto-save settings are now automatic and don't need configuration."""
+        pass
 
     def _open_folder(self, path: str):
         """Open a folder in the system file explorer in a cross-platform way.
@@ -722,59 +714,10 @@ class ConfigDialog(QDialog):
         """Setup the editor settings tab."""
         layout = QVBoxLayout(self.editor_tab)
         
-        # Autosave Settings
-        layout.addWidget(StrongBodyLabel("Impostazioni Salvataggio Automatico"))
-        layout.addWidget(BodyLabel("Configura la frequenza del salvataggio automatico delle note."))
-        
-        # Draft autosave interval
-        draft_layout = QHBoxLayout()
-        draft_layout.addWidget(BodyLabel("Salvataggio bozze (secondi):"))
-        self.draft_autosave_spinbox = QSpinBox()
-        self.draft_autosave_spinbox.setRange(1, 300)  # 1 second to 5 minutes
-        # Set default value or get from app_settings
-        if self.app_settings:
-            self.draft_autosave_spinbox.setValue(self.app_settings.get_autosave_draft_interval() // 1000)
-        else:
-            self.draft_autosave_spinbox.setValue(5)  # Default 5 seconds
-        self.draft_autosave_spinbox.setToolTip("Frequenza di salvataggio delle bozze (backup temporaneo)")
-        draft_layout.addWidget(self.draft_autosave_spinbox)
-        draft_layout.addWidget(BodyLabel("sec"))
-        draft_layout.addStretch()
-        layout.addLayout(draft_layout)
-        
-        # Full save interval
-        full_layout = QHBoxLayout()
-        full_layout.addWidget(BodyLabel("Salvataggio definitivo (secondi):"))
-        self.full_autosave_spinbox = QSpinBox()
-        self.full_autosave_spinbox.setRange(5, 600)  # 5 seconds to 10 minutes
-        # Set default value or get from app_settings
-        if self.app_settings:
-            self.full_autosave_spinbox.setValue(self.app_settings.get_autosave_full_interval() // 1000)
-        else:
-            self.full_autosave_spinbox.setValue(30)  # Default 30 seconds
-        self.full_autosave_spinbox.setToolTip("Frequenza di salvataggio definitivo nel database")
-        full_layout.addWidget(self.full_autosave_spinbox)
-        full_layout.addWidget(BodyLabel("sec"))
-        full_layout.addStretch()
-        layout.addLayout(full_layout)
-        
-        # Save indicator duration
-        indicator_layout = QHBoxLayout()
-        indicator_layout.addWidget(BodyLabel("Durata indicatore salvataggio (secondi):"))
-        self.save_indicator_spinbox = QSpinBox()
-        self.save_indicator_spinbox.setRange(1, 10)  # 1 to 10 seconds
-        # Set default value or get from app_settings
-        if self.app_settings:
-            self.save_indicator_spinbox.setValue(self.app_settings.get_save_indicator_duration() // 1000)
-        else:
-            self.save_indicator_spinbox.setValue(2)  # Default 2 seconds
-        self.save_indicator_spinbox.setToolTip("Durata della visualizzazione del checkmark ✓ nel tab")
-        indicator_layout.addWidget(self.save_indicator_spinbox)
-        indicator_layout.addWidget(BodyLabel("sec"))
-        indicator_layout.addStretch()
-        layout.addLayout(indicator_layout)
-        
+        # Note: Le impostazioni di salvataggio automatico sono state rimosse
+        # Il sistema ora utilizza salvataggio automatico senza configurazioni
+        layout.addWidget(StrongBodyLabel("Editor Note"))
+        layout.addWidget(BodyLabel("Il salvataggio delle note avviene ora automaticamente senza configurazioni necessarie."))
         layout.addWidget(BodyLabel(""))
-        layout.addWidget(BodyLabel("Nota: Le modifiche ai timer verranno applicate alla prossima apertura di una nota."))
         
         layout.addStretch()
